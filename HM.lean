@@ -5,6 +5,21 @@ open Std
 #check Decidable
 
 
+/-
+  Could do this?
+  simple.type := type base
+
+  inductive varBase where
+  | const : base -> varBase
+  | var : varType -> varBase
+-/
+
+
+inductive type (baseType : Type) where
+  | base : baseType → type baseType
+  | arrow : type baseType → type baseType → type baseType
+  deriving DecidableEq, BEq, Repr
+
 namespace simple
   /- A simple syntax to write expressions. No dependent types.
   purely for testing our HM implementation. This language allows some nonsense
@@ -24,28 +39,11 @@ namespace simple
   | if_else (e1 e2 e3 : expr)
   | apply (f : expr) (inp : expr)
 
-/-
-  Could do this?
-  inductive type (baseType: Type) where
-  | base : baseType -> type
-  | arrow : type → type → type
-
   inductive base where
   | nat
   | bool
-
-  simple.type := type base
-
-  inductive varBase where
-  | const : base -> varBase
-  | var : varType -> varBase
--/
-
-  inductive type where
-  | nat
-  | bool
-  | arrow : type → type → type --unused rn because we usually only represent arrow as a typeExpr which allows variable types...
   deriving DecidableEq, BEq, Repr
+
 
   -- examples
   #check (expr.const (const.nat 3) : expr)
@@ -59,54 +57,45 @@ end simple
 
 open simple
 
+
+/- HM Algorithm -/
+
 inductive ErrorT where
 | fail
 deriving Repr, DecidableEq, BEq
 
-abbrev typeVar : Type := Nat -- unknown type variable, e.g. 't1
+inductive varBase where
+| const : base → varBase -- known type, nat or bool
+| var : Nat → varBase -- unknown type variable, e.g. 't1
+deriving DecidableEq, BEq, Repr
+
+abbrev var_type := type varBase -- type expressions with variable types
+abbrev const_type := type base -- type expressions with only known, constant types
+
 abbrev InferM := StateT Nat (Except ErrorT) -- Monad to thread the next fresh type var, along with failures
 abbrev UnifyM := Except ErrorT
 
 -- get a fresh type variable
-def fresh : InferM typeVar := do
+def fresh : InferM Nat := do
   let n ← get
   set (n + 1)
   return n
 
-
--- an expression over types
-inductive typeExpr where
-| const : type → typeExpr -- known type, e.g. int
-| var : typeVar → typeExpr -- expression of just a typeVar
-| arrow : typeExpr → typeExpr → typeExpr -- function, e.g. int → 't1
-deriving DecidableEq, BEq, Repr
-
-#check (typeExpr.arrow (typeExpr.const type.nat) (typeExpr.var 1) : typeExpr)
-
-
 -- environment = a mapping from variables to their types
-abbrev env := HashMap var typeExpr
-abbrev env.ofList : List (var × typeExpr) → env := HashMap.ofList
-#check (env.ofList [("a", typeExpr.const type.nat), ("b", typeExpr.var 1)] : env)
-
+abbrev env := HashMap var var_type
+abbrev env.ofList : List (var × var_type) → env := HashMap.ofList
+#check (env.ofList [("a", type.base (varBase.const base.nat)), ("b", type.base (varBase.var 1))] : env)
 
 -- a constraint of the form 't1 = 't2
-abbrev Constraint := typeExpr × typeExpr
-
-
--- substitution {subst / var}, e.g. {int → int / 't}
-structure Substitution where
-  subst : type
-  var : typeVar
-
+abbrev Constraint := var_type × var_type
 
 -- return both the type of the expression and a list of constraints
-def infer (e : expr) (Γ : env) : InferM (typeExpr × List Constraint) :=
+def infer (e : expr) (Γ : env) : InferM (var_type × List Constraint) :=
   match e with
   | expr.const c => match c with
-    | const.nat _ => do return (typeExpr.const type.nat, [])
-    | const.bool _ => do return (typeExpr.const type.bool, [])
-    | const.plus => do return (typeExpr.const (type.arrow type.nat type.nat), [])
+    | const.nat _ => do return (type.base (varBase.const base.nat), [])
+    | const.bool _ => do return (type.base (varBase.const base.bool), [])
+    | const.plus => do return (type.arrow (type.base (varBase.const base.nat)) (type.base (varBase.const base.nat)), [])
   | expr.var name => match Γ[name]? with
     | some t => do return (t, [])
     | none => throw ErrorT.fail
@@ -116,63 +105,63 @@ def infer (e : expr) (Γ : env) : InferM (typeExpr × List Constraint) :=
     let (t2, C2) ← infer e2 Γ
     let (t3, C3) ← infer e3 Γ
     let C := [
-      (t1, typeExpr.const type.bool),
-      (t2, (typeExpr.var t')),
-      (t3, (typeExpr.var t'))
+      (t1, type.base (varBase.const base.bool)),
+      (t2, (type.base (varBase.var t'))),
+      (t3, (type.base (varBase.var t')))
     ]
-    return (typeExpr.var t', C1 ++ C2 ++ C3 ++ C)
+    return (type.base (varBase.var t'), C1 ++ C2 ++ C3 ++ C)
   | expr.lam name e => do
     let t' ← fresh
-    let (t1, C) ← infer e (Γ.insert name (typeExpr.var t'))
-    return (typeExpr.arrow (typeExpr.var t') t1, C)
+    let (t1, C) ← infer e (Γ.insert name (type.base (varBase.var t')))
+    return (type.arrow (type.base (varBase.var t')) t1, C)
   | expr.apply f inp => do
     let t' ← fresh
     let (t1, C1) ← infer f Γ
     let (t2, C2) ← infer inp Γ
-    let C := [(t1, typeExpr.arrow t2 (typeExpr.var t'))]
-    return (typeExpr.var t', C1 ++ C2 ++ C)
+    let C := [(t1, type.arrow t2 (type.base (varBase.var t')))]
+    return (type.base (varBase.var t'), C1 ++ C2 ++ C)
 
-def runInfer (e : expr) (Γ : env := ∅) : Except ErrorT (typeExpr × List Constraint) :=
+def runInfer (e : expr) (Γ : env := ∅) : Except ErrorT (var_type × List Constraint) :=
   (infer e Γ).run' 0
 
 
--- #eval runInfer (expr.const (const.nat 4))
-example : (runInfer (expr.const (const.nat 4)) = Except.ok (typeExpr.const (simple.type.nat), [])) := rfl
-
+#eval runInfer (expr.const (const.nat 4))
 #eval runInfer (expr.var "a") -- fail
-#eval runInfer (expr.var "a") (env.ofList [("a", typeExpr.const type.nat)]) -- nat
+
+-- substitution {subst / var}, e.g. {int → int / 't}
+structure Substitution where
+  subst : var_type
+  var : Nat
 
 
-def occurs (v : typeVar) (e : typeExpr) : Bool := sorry
+def occurs (v : Nat) (e : var_type) : Bool := sorry
 
-def applySubst (s : Substitution) (into : typeExpr) : typeExpr := sorry
+def applySubst (s : Substitution) (into : var_type) : var_type := sorry
 
 def applySubstList (s : Substitution) (into : List Constraint) : List Constraint :=
   sorry -- substitute s into the list
+
 
 def unify (C: List Constraint) : UnifyM (List Substitution) :=
   match C with
   | [] => do return []
   | (t1, t2) :: tail =>
+    let bindVar (x : Nat) (t : var_type) (tail : List Constraint): UnifyM (List Substitution) :=
+      if occurs x t then throw ErrorT.fail else do
+        let Sh := { subst := t, var := x }
+        let St ← unify tail
+        return Sh :: St
     match t1, t2 with
-    -- already unified, skip
-    | .const t1, .const t2 =>
-      if t1 = t2 then unify tail else throw ErrorT.fail
-    | .var t1', .var t2' =>
-      if t1' = t2' then unify tail else throw ErrorT.fail
-    -- new subst
-    | .var t1', .const t2 | .const t2, .var t1' => do
-      let Sh := { subst := t2, var := t1'}
-      let St ← unify (applySubstList Sh tail)
-      return Sh :: St
-    | .var t1', .arrow t2 t3 | .arrow t2 t3, .var t1' =>
-      if occurs t1' t2 ∨ occurs t1' t3 then throw ErrorT.fail else do
-      let Sh := { subst := type.arrow t2 t3, var := t1'}
-      let St ← unify (applySubstList Sh tail)
-      return Sh :: St
-
+    -- identical variables / identical constants: nothing to learn
+    | .base (.var x), .base (.var y) =>
+      if x = y then unify tail else bindVar x t2 tail
+    | .base (.const a), .base (.const b) =>
+      if a = b then unify tail else throw ErrorT.fail
+    -- a variable = anything else
+    | .base (.var x), t | t, .base (.var x) => bindVar x t2 tail
+    -- reduce
     | .arrow t1 t2, .arrow t3 t4 =>
-      unify ((t1, t3) :: (t3, t4) :: tail) -- push the two reduced constraints
+      unify ((t1, t3) :: (t2, t4) :: tail) -- push the two reduced constraints
     | _, _ => throw ErrorT.fail
 
 
