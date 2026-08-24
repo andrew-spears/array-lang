@@ -211,16 +211,6 @@ def infer (e : expr) (Γ : env) : InferM (var_type × List Constraint) :=
 def runInfer (e : expr) (Γ : env := ∅) : Except ErrorT (var_type × List Constraint) :=
   (infer e Γ).run' 0
 
-  #eval runInfer [lang| 3]
-  #eval runInfer [lang| true]
-  #eval runInfer [lang| 3 + x] (env.ofList [("x", [ty| nat])])
-  #eval runInfer [lang| f x y]                          -- application is left assoc: (f x) y
-  #eval runInfer [lang| false y]                        -- parses fine, fails typechecking later
-  #eval runInfer [lang| fun x => x + 1]
-  #eval runInfer [lang| if x then y else 3]
-  #eval runInfer [lang| fun x => if x then 1 else 0]
-  #eval runInfer [lang| (fun x => x + 1) 5]
-
 
 -- substitution {subst / var}, e.g. {int → int / 't}
 structure Substitution where
@@ -294,42 +284,6 @@ partial def unify (C: List Constraint) : UnifyM (List Substitution) :=
       unify ((t1, t3) :: (t2, t4) :: tail) -- push the two reduced constraints
     | _, _ => throw ErrorT.fail
 
-
--- trivial
-#eval unify []                                                    -- ok []
-#eval unify [([ty| nat], [ty| nat])]                              -- ok [], nothing to learn
-#eval unify [([ty| ?0], [ty| ?0])]                                -- ok [], same var
-
--- immediate failures
-#eval unify [([ty| nat], [ty| bool])]                             -- fail, distinct constants
-#eval unify [([ty| nat], [ty| nat -> nat])]                       -- fail, base vs arrow
-#eval unify [([ty| ?0], [ty| ?0 -> nat])]                         -- fail, occurs check
-
--- single substitutions
-#eval unify [([ty| ?0], [ty| nat])]                               -- {nat / ?0}
-#eval unify [([ty| nat -> nat], [ty| ?0])]                        -- {nat -> nat / ?0}, var on the right
-#eval unify [([ty| ?0], [ty| ?1])]                                -- {?1 / ?0}, var to var
-
--- structural decomposition
-#eval unify [([ty| ?0 -> ?1], [ty| nat -> bool])]                 -- {nat / ?0}, {bool / ?1}
-#eval unify [([ty| ?0 -> ?0], [ty| nat -> bool])]                 -- fail, ?0 can't be both
-
--- substitution must propagate into later constraints
-#eval unify [([ty| ?0], [ty| nat]), ([ty| ?0], [ty| bool])]       -- fail only if subst propagates
-#eval unify [([ty| ?0], [ty| ?1]), ([ty| ?1], [ty| nat])]         -- chain: both end up nat
-#eval unify [([ty| ?0 -> ?1], [ty| ?1 -> nat])]                   -- ?0 = ?1 = nat, needs propagation
-
--- your example, from `3 + x`
-#eval unify [([ty| nat -> nat -> nat], [ty| nat -> ?1]), ([ty| ?1], [ty| nat -> ?0])]
-                                                                  -- ?1 = nat -> nat, ?0 = nat
-
--- from the notes: 'x -> ('x -> int) = int -> 'y,  'x -> 'x = 'y
-#eval unify [([ty| ?0 -> (?0 -> nat)], [ty| nat -> ?1]), ([ty| ?0 -> ?0], [ty| ?1])]
-                                                                  -- ?0 = nat, ?1 = nat -> nat
-
--- nested, deeper occurs check
-#eval unify [([ty| ?0], [ty| (nat -> ?0) -> bool])]               -- fail, ?0 occurs nested
-
 def inferAndSolve (e : expr) (Γ : env := ∅) : Except ErrorT var_type := do
   let inferred ← runInfer e Γ
   let (t', constraints) := inferred
@@ -337,7 +291,7 @@ def inferAndSolve (e : expr) (Γ : env := ∅) : Except ErrorT var_type := do
   let solved := applySubstAll unified t'
   return solved
 
-
+/- end to end tests -/
 #eval inferAndSolve [lang| 3]
 #eval inferAndSolve [lang| true]
 #eval inferAndSolve [lang| 3 + x] (env.ofList [("x", [ty| nat])])
@@ -348,5 +302,3 @@ def inferAndSolve (e : expr) (Γ : env := ∅) : Except ErrorT var_type := do
 #eval inferAndSolve [lang| if x then y else 3] (env.ofList [("x", [ty| bool]), ("y", [ty| nat])])
 #eval inferAndSolve [lang| fun x => if x then 1 else 0]
 #eval inferAndSolve [lang| (fun x => x + 1) 5]
-
--- def getSubstitution (substs : (List Substitution)) : UnifyM typeExpr
