@@ -24,10 +24,28 @@ namespace simple
   | if_else (e1 e2 e3 : expr)
   | apply (f : expr) (inp : expr)
 
+/-
+  Could do this?
+  inductive type (baseType: Type) where
+  | base : baseType -> type
+  | arrow : type → type → type
+
+  inductive base where
+  | nat
+  | bool
+
+  simple.type := type base
+
+  inductive varBase where
+  | const : base -> varBase
+  | var : varType -> varBase
+-/
+
   inductive type where
   | nat
   | bool
-  | arrow : type → type → type
+  | arrow : type → type → type --unused rn because we usually only represent arrow as a typeExpr which allows variable types...
+  deriving DecidableEq, BEq, Repr
 
   -- examples
   #check (expr.const (const.nat 3) : expr)
@@ -43,11 +61,11 @@ open simple
 
 inductive ErrorT where
 | fail
+deriving Repr, DecidableEq, BEq
 
 abbrev typeVar : Type := Nat -- unknown type variable, e.g. 't1
 abbrev InferM := StateT Nat (Except ErrorT) -- Monad to thread the next fresh type var, along with failures
-
-abbrev fail {T} : InferM T := Except.error ErrorT.fail
+abbrev UnifyM := Except ErrorT
 
 -- get a fresh type variable
 def fresh : InferM typeVar := do
@@ -61,7 +79,7 @@ inductive typeExpr where
 | const : type → typeExpr -- known type, e.g. int
 | var : typeVar → typeExpr -- expression of just a typeVar
 | arrow : typeExpr → typeExpr → typeExpr -- function, e.g. int → 't1
--- TODO: somehow get Decidable instance for typeExpr... or another way to make unify check equality like this
+deriving DecidableEq, BEq, Repr
 
 #check (typeExpr.arrow (typeExpr.const type.nat) (typeExpr.var 1) : typeExpr)
 
@@ -78,7 +96,7 @@ abbrev Constraint := typeExpr × typeExpr
 
 -- substitution {subst / var}, e.g. {int → int / 't}
 structure Substitution where
-  subst : typeExpr
+  subst : type
   var : typeVar
 
 
@@ -91,7 +109,7 @@ def infer (e : expr) (Γ : env) : InferM (typeExpr × List Constraint) :=
     | const.plus => do return (typeExpr.const (type.arrow type.nat type.nat), [])
   | expr.var name => match Γ[name]? with
     | some t => do return (t, [])
-    | none => fail
+    | none => throw ErrorT.fail
   | expr.if_else e1 e2 e3 => do
     let t' ← fresh -- the final output type
     let (t1, C1 )← infer e1 Γ
@@ -114,11 +132,49 @@ def infer (e : expr) (Γ : env) : InferM (typeExpr × List Constraint) :=
     let C := [(t1, typeExpr.arrow t2 (typeExpr.var t'))]
     return (typeExpr.var t', C1 ++ C2 ++ C)
 
+def runInfer (e : expr) (Γ : env := ∅) : Except ErrorT (typeExpr × List Constraint) :=
+  (infer e Γ).run' 0
 
--- def unify (C: List Constraint) : Option (List Substitution) :=
---   match C with
---   | [] => some []
---   | (t1, t2) :: tail =>
---     match t1, t2 with
---     | typeExpr.const t1, typeExpr.const t2 => if t1 = t2 then unify C.tail else none -- TODO: something like this?
---     | typeExpr.var t1', typeExpr.var t2' => if t1' = t2' then unify C.tail else none
+
+-- #eval runInfer (expr.const (const.nat 4))
+example : (runInfer (expr.const (const.nat 4)) = Except.ok (typeExpr.const (simple.type.nat), [])) := rfl
+
+#eval runInfer (expr.var "a") -- fail
+#eval runInfer (expr.var "a") (env.ofList [("a", typeExpr.const type.nat)]) -- nat
+
+
+def occurs (v : typeVar) (e : typeExpr) : Bool := sorry
+
+def applySubst (s : Substitution) (into : typeExpr) : typeExpr := sorry
+
+def applySubstList (s : Substitution) (into : List Constraint) : List Constraint :=
+  sorry -- substitute s into the list
+
+def unify (C: List Constraint) : UnifyM (List Substitution) :=
+  match C with
+  | [] => do return []
+  | (t1, t2) :: tail =>
+    match t1, t2 with
+    -- already unified, skip
+    | .const t1, .const t2 =>
+      if t1 = t2 then unify tail else throw ErrorT.fail
+    | .var t1', .var t2' =>
+      if t1' = t2' then unify tail else throw ErrorT.fail
+    -- new subst
+    | .var t1', .const t2 | .const t2, .var t1' => do
+      let Sh := { subst := t2, var := t1'}
+      let St ← unify (applySubstList Sh tail)
+      return Sh :: St
+    | .var t1', .arrow t2 t3 | .arrow t2 t3, .var t1' =>
+      if occurs t1' t2 ∨ occurs t1' t3 then throw ErrorT.fail else do
+      let Sh := { subst := type.arrow t2 t3, var := t1'}
+      let St ← unify (applySubstList Sh tail)
+      return Sh :: St
+
+    | .arrow t1 t2, .arrow t3 t4 =>
+      unify ((t1, t3) :: (t3, t4) :: tail) -- push the two reduced constraints
+    | _, _ => throw ErrorT.fail
+
+
+
+-- def getSubstitution (substs : (List Substitution)) : UnifyM typeExpr
