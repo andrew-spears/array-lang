@@ -2,8 +2,9 @@
 import Std.Data.HashMap
 open Std
 
-
-
+/- a parametric type. Either base or arrow between bases.
+used here so that the same type expressions can be used for
+actual types of simple (nat, bool), but also variable types in the HM algorithm -/
 inductive type (baseType : Type) where
   | base : baseType → type baseType
   | arrow : type baseType → type baseType → type baseType
@@ -33,7 +34,7 @@ namespace simple
   | bool
   deriving DecidableEq, BEq, Repr
 
-
+section simple_syntax
   /- Surface syntax, so we can write `[lang| fun x => if x then 1 else 0]`
   instead of nesting constructors by hand. -/
   declare_syntax_cat lang
@@ -73,12 +74,13 @@ namespace simple
   #check [lang| if x then y else 3]
   #check [lang| fun x => if x then 1 else 0]
   #check [lang| (fun x => x + 1) 5]
+end simple_syntax
 end simple
 
 open simple
 
 
-
+section hindley_milner
 /- HM Algorithm -/
 
 -- types of errors during inference. just generic fail for now
@@ -96,61 +98,63 @@ deriving DecidableEq, BEq, Repr
 abbrev const_type := type base -- alias for type expressions with only known, constant types
 abbrev var_type := type varBase -- alias for type expressions with variable types
 
-/- Surface syntax for type expressions, so we can write `[ty| nat -> '0]`
-instead of nesting constructors. `->` is right assoc, as usual. -/
-declare_syntax_cat ty
+section var_type_syntax
+  /- Surface syntax for type expressions, so we can write `[ty| nat -> '0]`
+  instead of nesting constructors. `->` is right assoc, as usual. -/
+  declare_syntax_cat ty
 
-syntax "nat" : ty
-syntax "bool" : ty
-syntax "?" num : ty                             -- type variable, e.g. ?0
-syntax "?" "(" term ")" : ty                    -- type variable from a runtime Nat, e.g. ?(t')
-syntax "~" "(" term ")" : ty                    -- splice in a whole var_type, e.g. ~(t1)
-syntax "(" ty ")" : ty
-syntax:25 ty:26 " -> " ty:25 : ty               -- arrow, right assoc
+  syntax "nat" : ty
+  syntax "bool" : ty
+  syntax "?" num : ty                             -- type variable, e.g. ?0
+  syntax "?" "(" term ")" : ty                    -- type variable from a runtime Nat, e.g. ?(t')
+  syntax "~" "(" term ")" : ty                    -- splice in a whole var_type, e.g. ~(t1)
+  syntax "(" ty ")" : ty
+  syntax:25 ty:26 " -> " ty:25 : ty               -- arrow, right assoc
 
-syntax "[ty| " ty "]" : term
+  syntax "[ty| " ty "]" : term
 
-macro_rules
-| `([ty| nat])        => `(type.base (varBase.const base.nat))
-| `([ty| bool])       => `(type.base (varBase.const base.bool))
-| `([ty| ?$n:num])    => `(type.base (varBase.var $n))
-| `([ty| ?($t:term)]) => `(type.base (varBase.var $t))
-| `([ty| ~($t:term)]) => `($t)
-| `([ty| ($t)])       => `([ty| $t])
-| `([ty| $a -> $b])   => `(type.arrow [ty| $a] [ty| $b])
+  macro_rules
+  | `([ty| nat])        => `(type.base (varBase.const base.nat))
+  | `([ty| bool])       => `(type.base (varBase.const base.bool))
+  | `([ty| ?$n:num])    => `(type.base (varBase.var $n))
+  | `([ty| ?($t:term)]) => `(type.base (varBase.var $t))
+  | `([ty| ~($t:term)]) => `($t)
+  | `([ty| ($t)])       => `([ty| $t])
+  | `([ty| $a -> $b])   => `(type.arrow [ty| $a] [ty| $b])
 
-#check [ty| nat]
-#check [ty| nat -> bool]
-#check [ty| ?0 -> ?1 -> ?0]                     -- right assoc: ?0 -> (?1 -> ?0)
-#check [ty| (nat -> bool) -> ?2]
+  #check [ty| nat]
+  #check [ty| nat -> bool]
+  #check [ty| ?0 -> ?1 -> ?0]                     -- right assoc: ?0 -> (?1 -> ?0)
+  #check [ty| (nat -> bool) -> ?2]
 
-/- Print types back in the `[ty| ...]` surface syntax rather than as raw
-constructors, so `#eval` output is readable. Parenthesise the left side of an
-arrow only, since `->` is right assoc. -/
-instance : ToString base where
-  toString
-    | base.nat => "nat"
-    | base.bool => "bool"
+  /- Print types back in the `[ty| ...]` surface syntax rather than as raw
+  constructors, so `#eval` output is readable. Parenthesise the left side of an
+  arrow only, since `->` is right assoc. -/
+  instance : ToString base where
+    toString
+      | base.nat => "nat"
+      | base.bool => "bool"
 
-instance : ToString varBase where
-  toString
-    | varBase.const b => toString b
-    | varBase.var n => s!"?{n}"
+  instance : ToString varBase where
+    toString
+      | varBase.const b => toString b
+      | varBase.var n => s!"?{n}"
 
-def type.toString [ToString α] : type α → String
-  | .base b => ToString.toString b
-  | .arrow a b =>
-    let l := match a with
-      | .arrow _ _ => s!"({type.toString a})"   -- left side needs parens
-      | _ => type.toString a
-    s!"{l} -> {type.toString b}"
+  def type.toString [ToString α] : type α → String
+    | .base b => ToString.toString b
+    | .arrow a b =>
+      let l := match a with
+        | .arrow _ _ => s!"({type.toString a})"   -- left side needs parens
+        | _ => type.toString a
+      s!"{l} -> {type.toString b}"
 
-instance [ToString α] : ToString (type α) := ⟨type.toString⟩
-instance [ToString α] : Repr (type α) := ⟨fun t _ => type.toString t⟩
+  instance [ToString α] : ToString (type α) := ⟨type.toString⟩
+  instance [ToString α] : Repr (type α) := ⟨fun t _ => type.toString t⟩
 
-#eval [ty| nat -> bool]
-#eval [ty| ?0 -> ?1 -> ?0]
-#eval [ty| (nat -> bool) -> ?2]
+  #eval [ty| nat -> bool]
+  #eval [ty| ?0 -> ?1 -> ?0]
+  #eval [ty| (nat -> bool) -> ?2]
+end var_type_syntax
 
 abbrev InferM := StateT Nat (Except ErrorT) -- Monad to thread the next fresh type var, along with failures
 abbrev UnifyM := Except ErrorT
@@ -167,6 +171,13 @@ def fresh : InferM Nat := do
   let n ← get
   set (n + 1)
   return n
+
+-- type variable occurs in type expression
+def occurs (v : Nat) (e : var_type) : Bool :=
+  match e with
+  | .base (.var x) => x = v
+  | .arrow t1 t2 => (occurs v t1) ∨ (occurs v t2)
+  | _ => false
 
 -- environment = a mapping from variables to their types. can be variable
 abbrev env := HashMap var var_type
@@ -220,12 +231,6 @@ deriving DecidableEq, BEq
 instance : ToString Substitution where
   toString s := "{" ++ toString s.subst ++ " / ?" ++ toString s.var ++ "}"
 instance : Repr Substitution := ⟨fun s _ => toString s⟩
-
-def occurs (v : Nat) (e : var_type) : Bool :=
-  match e with
-  | .base (.var x) => x = v
-  | .arrow t1 t2 => (occurs v t1) ∨ (occurs v t2)
-  | _ => false
 
 def applySubst (s : Substitution) (into : var_type) : var_type :=
   match into with
@@ -297,8 +302,11 @@ def inferAndSolve (e : expr) (Γ : env := ∅) : Except ErrorT var_type := do
 #eval inferAndSolve [lang| 3 + x] (env.ofList [("x", [ty| nat])])
 #eval inferAndSolve [lang| f x y] (env.ofList [("x", [ty| nat]), ("y", [ty| bool]), ("f", [ty| nat -> bool -> bool])])
 #eval inferAndSolve [lang| f (x y)] (env.ofList [("x", [ty| bool -> nat]), ("y", [ty| bool]), ("f", [ty| nat -> bool -> bool])])
-#eval inferAndSolve [lang| false y] (env.ofList [("y", [ty| bool])])                       -- parses fine, fails typechecking later
+#eval inferAndSolve [lang| false y] (env.ofList [("y", [ty| bool])])   -- parses fine, fails typechecking later
 #eval inferAndSolve [lang| fun x => x + 1]
 #eval inferAndSolve [lang| if x then y else 3] (env.ofList [("x", [ty| bool]), ("y", [ty| nat])])
 #eval inferAndSolve [lang| fun x => if x then 1 else 0]
 #eval inferAndSolve [lang| (fun x => x + 1) 5]
+
+
+end hindley_milner
