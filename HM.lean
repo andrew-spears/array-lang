@@ -2,17 +2,6 @@
 import Std.Data.HashMap
 open Std
 
-#check Decidable
-
-
-/-
-  Could do this?
-  simple.type := type base
-
-  inductive varBase where
-  | const : base -> varBase
-  | var : varType -> varBase
--/
 
 
 inductive type (baseType : Type) where
@@ -134,13 +123,41 @@ structure Substitution where
   var : Nat
 
 
-def occurs (v : Nat) (e : var_type) : Bool := sorry
+def occurs (v : Nat) (e : var_type) : Bool :=
+  match e with
+  | .base (.var x) => x = v
+  | .arrow t1 t2 => (occurs v t1) ∨ (occurs v t2)
+  | _ => false
 
-def applySubst (s : Substitution) (into : var_type) : var_type := sorry
+def applySubst (s : Substitution) (into : var_type) : var_type :=
+  match into with
+  | .base (.var x) => if x = s.var then s.subst else into
+  | .arrow t1 t2 => .arrow (applySubst s t1) (applySubst s t2)
+  | _ => into
 
 def applySubstList (s : Substitution) (into : List Constraint) : List Constraint :=
-  sorry -- substitute s into the list
+  into.map (fun c => (applySubst s c.1, applySubst s c.2))
 
+
+-- total number of nodes in the tree
+def sizeT : var_type → Nat
+  | .base _ => 1
+  | .arrow a b => 1 + sizeT a + sizeT b
+
+-- sizeT summed over a list of constraints
+def sizeC (c : List Constraint) : Nat :=
+  let sizes := c.map (fun c => sizeT c.1 + sizeT c.2)
+  sizes.sum
+
+def varsOf : var_type → List Nat
+  | .base (.var x) => [x]
+  | .arrow t1 t2 => varsOf t1 ++ varsOf t2
+  | _ => []
+
+def distinctVarsT (t : var_type) : Nat := (varsOf t).eraseDups.length
+
+def distinctVarsC (C : List Constraint) : Nat :=
+  (C.map (fun c => distinctVarsT c.1 + distinctVarsT c.2)).sum
 
 def unify (C: List Constraint) : UnifyM (List Substitution) :=
   match C with
@@ -148,9 +165,9 @@ def unify (C: List Constraint) : UnifyM (List Substitution) :=
   | (t1, t2) :: tail =>
     let bindVar (x : Nat) (t : var_type) (tail : List Constraint): UnifyM (List Substitution) :=
       if occurs x t then throw ErrorT.fail else do
-        let Sh := { subst := t, var := x }
-        let St ← unify tail
-        return Sh :: St
+        let s := { subst := t, var := x }
+        let St ← unify (applySubstList s tail)
+        return s :: St
     match t1, t2 with
     -- identical variables / identical constants: nothing to learn
     | .base (.var x), .base (.var y) =>
@@ -163,6 +180,9 @@ def unify (C: List Constraint) : UnifyM (List Substitution) :=
     | .arrow t1 t2, .arrow t3 t4 =>
       unify ((t1, t3) :: (t2, t4) :: tail) -- push the two reduced constraints
     | _, _ => throw ErrorT.fail
+  termination_by (distinctVarsC C, sizeC C)
+  decreasing_by sorry; sorry; sorry; sorry
+
 
 
 
