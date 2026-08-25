@@ -20,7 +20,6 @@ namespace simple
   inductive const where
   | nat (n : Nat)
   | bool (b : Bool)
-  | plus
 
   inductive expr where
   | const (c : const)
@@ -60,7 +59,7 @@ section simple_syntax
     | name    => `(expr.var $(Lean.quote name))
   | `([lang| ($e)])              => `([lang| $e])
   | `([lang| $f $a])             => `(expr.apply [lang| $f] [lang| $a])
-  | `([lang| $a + $b])           => `(expr.apply (expr.apply (expr.const const.plus) [lang| $a]) [lang| $b])
+  | `([lang| $a + $b])           => `(expr.apply (expr.apply (expr.var "+") [lang| $a]) [lang| $b])
   | `([lang| fun $x => $b])      => `(expr.lam $(Lean.quote x.getId.toString) [lang| $b])
   | `([lang| if $c then $t else $e]) => `(expr.if_else [lang| $c] [lang| $t] [lang| $e])
 
@@ -182,7 +181,9 @@ def occurs (v : Nat) (e : var_type) : Bool :=
 -- environment = a mapping from variables to their types. can be variable
 abbrev env := HashMap var var_type
 abbrev env.ofList : List (var × var_type) → env := HashMap.ofList
-#check (env.ofList [("a", [ty| nat]), ("b", [ty| ?1])] : env)
+abbrev initialEnv : env := env.ofList [("+", [ty| nat -> nat -> nat])]
+abbrev env.extendInitial (Γ : env) := initialEnv.union Γ
+#eval env.extendInitial <| env.ofList [("a", [ty| nat]), ("b", [ty| ?1])]
 
 -- a constraint of the form 't1 = 't2
 abbrev Constraint := var_type × var_type
@@ -193,7 +194,6 @@ def infer (e : expr) (Γ : env) : InferM (var_type × List Constraint) :=
   | expr.const c => match c with
     | const.nat _ => do return ([ty| nat], [])
     | const.bool _ => do return ([ty| bool], [])
-    | const.plus => do return ([ty| nat -> nat -> nat], [])
   | expr.var name => match Γ[name]? with
     | some t => do return (t, [])
     | none => throw ErrorT.fail
@@ -219,7 +219,7 @@ def infer (e : expr) (Γ : env) : InferM (var_type × List Constraint) :=
     let C := [(t1, [ty| ~(t2) -> ?(t')])]
     return ([ty| ?(t')], C1 ++ C2 ++ C)
 
-def runInfer (e : expr) (Γ : env := ∅) : Except ErrorT (var_type × List Constraint) :=
+def runInfer (e : expr) (Γ : env := initialEnv) : Except ErrorT (var_type × List Constraint) :=
   (infer e Γ).run' 0
 
 
@@ -289,7 +289,7 @@ partial def unify (C: List Constraint) : UnifyM (List Substitution) :=
       unify ((t1, t3) :: (t2, t4) :: tail) -- push the two reduced constraints
     | _, _ => throw ErrorT.fail
 
-def inferAndSolve (e : expr) (Γ : env := ∅) : Except ErrorT var_type := do
+def inferAndSolve (e : expr) (Γ : env := initialEnv) : Except ErrorT var_type := do
   let inferred ← runInfer e Γ
   let (t', constraints) := inferred
   let unified ← unify constraints
@@ -297,16 +297,33 @@ def inferAndSolve (e : expr) (Γ : env := ∅) : Except ErrorT var_type := do
   return solved
 
 /- end to end tests -/
-#eval inferAndSolve [lang| 3]
-#eval inferAndSolve [lang| true]
-#eval inferAndSolve [lang| 3 + x] (env.ofList [("x", [ty| nat])])
-#eval inferAndSolve [lang| f x y] (env.ofList [("x", [ty| nat]), ("y", [ty| bool]), ("f", [ty| nat -> bool -> bool])])
-#eval inferAndSolve [lang| f (x y)] (env.ofList [("x", [ty| bool -> nat]), ("y", [ty| bool]), ("f", [ty| nat -> bool -> bool])])
-#eval inferAndSolve [lang| false y] (env.ofList [("y", [ty| bool])])   -- parses fine, fails typechecking later
-#eval inferAndSolve [lang| fun x => x + 1]
-#eval inferAndSolve [lang| if x then y else 3] (env.ofList [("x", [ty| bool]), ("y", [ty| nat])])
-#eval inferAndSolve [lang| fun x => if x then 1 else 0]
-#eval inferAndSolve [lang| (fun x => x + 1) 5]
+
+def test_env := env.extendInitial <| env.ofList [
+  ("x", [ty| nat]),
+  ("y", [ty| nat]),
+  ("b1", [ty| bool]),
+  ("b2", [ty| bool]),
+  ("f", [ty| nat -> nat]),
+  ("g", [ty| nat -> nat]),
+  ("h", [ty| nat -> nat -> nat]),
+  ("nb", [ty| nat -> bool]),
+  ("bn", [ty| bool -> nat]),
+  ("bb", [ty| bool -> bool])
+]
+#eval inferAndSolve [lang| 3] test_env -- nat
+#eval inferAndSolve [lang| true] test_env -- bool
+#eval inferAndSolve [lang| 3 + x]  test_env -- nat
+#eval inferAndSolve [lang| 3 + x]  test_env -- nat
+#eval inferAndSolve [lang| f x] test_env -- nat
+#eval inferAndSolve [lang| f (g x)] test_env -- nat
+#eval inferAndSolve [lang| h x y] test_env -- nat
+#eval inferAndSolve [lang| nb (h x y)] test_env -- bool
+#eval inferAndSolve [lang| bn (nb (h x y))] test_env -- nat
+#eval inferAndSolve [lang| false y] test_env -- fail
+#eval inferAndSolve [lang| fun x => x + 1] test_env -- nat → nat
+#eval inferAndSolve [lang| if b1 then y else 3] test_env -- nat
+#eval inferAndSolve [lang| fun x => if x then 1 else 0] test_env
+#eval inferAndSolve [lang| (fun x => x + 1) 5] test_env
 
 
 end hindley_milner
