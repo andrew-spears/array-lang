@@ -56,12 +56,12 @@ We would then actually solve for 't using the set of constraints, but we will ge
 If we have an anonymous function `fun x => e`:
 
 ```
-env |- fun x => e : 't1 -> t2 -| C
-    if fresh 't1
-    and env + {x : 't1} |- e : t2 -| C
+env |- fun x => e : 't -> t1 -| C
+    if fresh 't
+    and env + {x : 't} |- e : t1 -| C
 ```
 
-so we first append x : 't1 to the env, then infer e, then return its constraint set.
+so we first append x : 't to the env, then infer e, then return its constraint set.
 
 For example
 
@@ -192,3 +192,33 @@ reductions: match t1 = t2 with
 | t1 -> t2 = t3 -> t4 => add constraints t1 = t3, t2 = t4
 | 'x = t (where 'x does not appear in t) => substitute {t / 'x}
 | else => fail
+
+another example:
+
+```
+('x -> int) -> 'x  = 'y -> int
+'x -> 'x = 'y
+```
+
+reduce
+
+```
+('x -> int) = 'y
+'x  = int
+'x -> 'x = 'y
+```
+
+subst `{ ('x -> int) / 'y }`
+
+```
+'x = int
+'x -> 'x = 'x -> int
+```
+
+subst `{ int / 'x }`
+
+```
+int -> int = int -> int
+```
+
+done

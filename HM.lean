@@ -195,7 +195,7 @@ section constraints
 
   -- return both the type of the expression (variable) and a list of constraints
   -- env |- e : t -| C, return t, C
-  def infer (e : expr) (Γ : env) : InferM (var_type × List Constraint) :=
+  def buildConstraints (e : expr) (Γ : env) : InferM (var_type × List Constraint) :=
     match e with
     | expr.const c => match c with
       | const.nat _ => do return ([ty| nat], [])
@@ -205,9 +205,9 @@ section constraints
       | none => throw ErrorT.fail
     | expr.if_else e1 e2 e3 => do
       let t' ← fresh -- the final output type
-      let (t1, C1 )← infer e1 Γ
-      let (t2, C2) ← infer e2 Γ
-      let (t3, C3) ← infer e3 Γ
+      let (t1, C1 )← buildConstraints e1 Γ
+      let (t2, C2) ← buildConstraints e2 Γ
+      let (t3, C3) ← buildConstraints e3 Γ
       let C := [
         (t1, [ty| bool]),
         (t2, [ty| ?(t')]),
@@ -216,17 +216,17 @@ section constraints
       return ([ty| ?(t')], C1 ++ C2 ++ C3 ++ C)
     | expr.lam name e => do
       let t' ← fresh
-      let (t1, C) ← infer e (Γ.update name [ty| ?(t')])
+      let (t1, C) ← buildConstraints e (Γ.update name [ty| ?(t')])
       return ([ty| ?(t') -> ~(t1)], C)
     | expr.apply f inp => do
       let t' ← fresh
-      let (t1, C1) ← infer f Γ
-      let (t2, C2) ← infer inp Γ
+      let (t1, C1) ← buildConstraints f Γ
+      let (t2, C2) ← buildConstraints inp Γ
       let C := [(t1, [ty| ~(t2) -> ?(t')])]
       return ([ty| ?(t')], C1 ++ C2 ++ C)
 
-  def runInfer (e : expr) (Γ : env := initialEnv) : Except ErrorT (var_type × List Constraint) :=
-    (infer e Γ).run' 0
+  def runBuildConstraints (e : expr) (Γ : env := initialEnv) : Except ErrorT (var_type × List Constraint) :=
+    (buildConstraints e Γ).run' 0
 
 end constraints
 
@@ -294,8 +294,9 @@ section unification
 
 end unification
 
+-- top level function, returns the inferred type
 def inferAndSolve (e : expr) (Γ : env := initialEnv) : Except ErrorT var_type := do
-  let inferred ← runInfer e Γ
+  let inferred ← runBuildConstraints e Γ
   let (t', constraints) := inferred
   let subst ← unify constraints
   let solved := applySubst subst t'
@@ -329,6 +330,7 @@ def test_env := env.extendInitial <| env.ofList [
 #eval inferAndSolve [lang| if b1 then y else 3] test_env -- nat
 #eval inferAndSolve [lang| fun x => if x then 1 else 0] test_env
 #eval inferAndSolve [lang| (fun x => x + 1) 5] test_env
+#eval inferAndSolve [lang| (fun f => fun x => f (x + 1))] initialEnv -- from notes
 
 
 end hindley_milner
