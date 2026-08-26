@@ -179,11 +179,17 @@ def occurs (v : Nat) (e : var_type) : Bool :=
   | _ => false
 
 -- environment = a mapping from variables to their types. can be variable
-abbrev env := HashMap var var_type
-abbrev env.ofList : List (var × var_type) → env := HashMap.ofList
-abbrev initialEnv : env := env.ofList [("+", [ty| nat -> nat -> nat])]
+abbrev env := var → Option var_type
+abbrev env.empty : env := fun _ => none
+abbrev env.update (x : var) (t : var_type) : env → env :=
+  fun Γ y => if y=x then some t else Γ y
+abbrev env.ofList (L : List (var × var_type)) : env :=
+  L.foldl (λ Γ (x, t) => Γ.update x t) env.empty
+abbrev env.union (Γ Γ' : env) : env := -- preference to right arg
+  fun x => if Γ' x = none then Γ x else Γ' x
+
+abbrev initialEnv := env.ofList [("+", [ty| nat -> nat -> nat])]
 abbrev env.extendInitial (Γ : env) := initialEnv.union Γ
-#eval env.extendInitial <| env.ofList [("a", [ty| nat]), ("b", [ty| ?1])]
 
 -- a constraint of the form 't1 = 't2
 abbrev Constraint := var_type × var_type
@@ -194,7 +200,7 @@ def infer (e : expr) (Γ : env) : InferM (var_type × List Constraint) :=
   | expr.const c => match c with
     | const.nat _ => do return ([ty| nat], [])
     | const.bool _ => do return ([ty| bool], [])
-  | expr.var name => match Γ[name]? with
+  | expr.var x => match Γ x with
     | some t => do return (t, [])
     | none => throw ErrorT.fail
   | expr.if_else e1 e2 e3 => do
@@ -210,7 +216,7 @@ def infer (e : expr) (Γ : env) : InferM (var_type × List Constraint) :=
     return ([ty| ?(t')], C1 ++ C2 ++ C3 ++ C)
   | expr.lam name e => do
     let t' ← fresh
-    let (t1, C) ← infer e (Γ.insert name [ty| ?(t')])
+    let (t1, C) ← infer e (Γ.update name [ty| ?(t')])
     return ([ty| ?(t') -> ~(t1)], C)
   | expr.apply f inp => do
     let t' ← fresh
