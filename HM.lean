@@ -79,21 +79,27 @@ end simple
 open simple
 
 
-section hindley_milner
 /- HM Algorithm -/
+section hindley_milner
 
 -- types of errors during inference. just generic fail for now
 inductive ErrorT where
 | fail
 deriving Repr, DecidableEq, BEq
+abbrev InferM := StateT Nat (Except ErrorT) -- Monad to thread the next fresh type var, along with failures
+abbrev UnifyM := Except ErrorT
+instance [BEq ε] [BEq α] : BEq (Except ε α) where
+  beq
+    | .ok a, .ok b => a == b
+    | .error a, .error b => a == b
+    | _, _ => false
 
-/- a different base type to use for the algorithm. this intercepts the `base` of
+/- a different base type which intercepts the `base` of
 the actual language to allow variable types in type expressions -/
 inductive varBase where
 | const : base → varBase -- known type, nat or bool
 | var : Nat → varBase -- unknown type variable, e.g. 't1
 deriving DecidableEq, BEq, Repr
-
 abbrev const_type := type base -- alias for type expressions with only known, constant types
 abbrev var_type := type varBase -- alias for type expressions with variable types
 
@@ -155,151 +161,151 @@ section var_type_syntax
   #eval [ty| (nat -> bool) -> ?2]
 end var_type_syntax
 
-abbrev InferM := StateT Nat (Except ErrorT) -- Monad to thread the next fresh type var, along with failures
-abbrev UnifyM := Except ErrorT
+section constraints
 
--- core has no BEq for Except, but we want it to state test cases below
-instance [BEq ε] [BEq α] : BEq (Except ε α) where
-  beq
-    | .ok a, .ok b => a == b
-    | .error a, .error b => a == b
-    | _, _ => false
+  -- get a fresh unused type variable
+  def fresh : InferM Nat := do
+    let n ← get
+    set (n + 1)
+    return n
 
--- get a fresh unused type variable
-def fresh : InferM Nat := do
-  let n ← get
-  set (n + 1)
-  return n
+  -- type variable occurs in type expression
+  def occurs (v : Nat) (e : var_type) : Bool :=
+    match e with
+    | .base (.var x) => x = v
+    | .arrow t1 t2 => (occurs v t1) ∨ (occurs v t2)
+    | _ => false
 
--- type variable occurs in type expression
-def occurs (v : Nat) (e : var_type) : Bool :=
-  match e with
-  | .base (.var x) => x = v
-  | .arrow t1 t2 => (occurs v t1) ∨ (occurs v t2)
-  | _ => false
+  -- environment = a mapping from variables to their types. can be variable
+  abbrev env := var → Option var_type
+  abbrev env.empty : env := fun _ => none
+  abbrev env.update (x : var) (t : var_type) : env → env :=
+    fun Γ y => if y=x then some t else Γ y
+  abbrev env.ofList (L : List (var × var_type)) : env :=
+    L.foldl (λ Γ (x, t) => Γ.update x t) env.empty
+  abbrev env.union (Γ Γ' : env) : env := -- preference to right arg
+    fun x => if Γ' x = none then Γ x else Γ' x
 
--- environment = a mapping from variables to their types. can be variable
-abbrev env := var → Option var_type
-abbrev env.empty : env := fun _ => none
-abbrev env.update (x : var) (t : var_type) : env → env :=
-  fun Γ y => if y=x then some t else Γ y
-abbrev env.ofList (L : List (var × var_type)) : env :=
-  L.foldl (λ Γ (x, t) => Γ.update x t) env.empty
-abbrev env.union (Γ Γ' : env) : env := -- preference to right arg
-  fun x => if Γ' x = none then Γ x else Γ' x
+  -- initial environment with types of built-ins
+  abbrev initialEnv := env.ofList [("+", [ty| nat -> nat -> nat])]
+  abbrev env.extendInitial (Γ : env) := initialEnv.union Γ
 
-abbrev initialEnv := env.ofList [("+", [ty| nat -> nat -> nat])]
-abbrev env.extendInitial (Γ : env) := initialEnv.union Γ
+  -- a constraint of the form 't1 = 't2
+  abbrev Constraint := var_type × var_type
 
--- a constraint of the form 't1 = 't2
-abbrev Constraint := var_type × var_type
+  -- return both the type of the expression (variable) and a list of constraints
+  -- env |- e : t -| C, return t, C
+  def infer (e : expr) (Γ : env) : InferM (var_type × List Constraint) :=
+    match e with
+    | expr.const c => match c with
+      | const.nat _ => do return ([ty| nat], [])
+      | const.bool _ => do return ([ty| bool], [])
+    | expr.var x => match Γ x with
+      | some t => do return (t, [])
+      | none => throw ErrorT.fail
+    | expr.if_else e1 e2 e3 => do
+      let t' ← fresh -- the final output type
+      let (t1, C1 )← infer e1 Γ
+      let (t2, C2) ← infer e2 Γ
+      let (t3, C3) ← infer e3 Γ
+      let C := [
+        (t1, [ty| bool]),
+        (t2, [ty| ?(t')]),
+        (t3, [ty| ?(t')])
+      ]
+      return ([ty| ?(t')], C1 ++ C2 ++ C3 ++ C)
+    | expr.lam name e => do
+      let t' ← fresh
+      let (t1, C) ← infer e (Γ.update name [ty| ?(t')])
+      return ([ty| ?(t') -> ~(t1)], C)
+    | expr.apply f inp => do
+      let t' ← fresh
+      let (t1, C1) ← infer f Γ
+      let (t2, C2) ← infer inp Γ
+      let C := [(t1, [ty| ~(t2) -> ?(t')])]
+      return ([ty| ?(t')], C1 ++ C2 ++ C)
 
--- return both the type of the expression (variable) and a list of constraints
-def infer (e : expr) (Γ : env) : InferM (var_type × List Constraint) :=
-  match e with
-  | expr.const c => match c with
-    | const.nat _ => do return ([ty| nat], [])
-    | const.bool _ => do return ([ty| bool], [])
-  | expr.var x => match Γ x with
-    | some t => do return (t, [])
-    | none => throw ErrorT.fail
-  | expr.if_else e1 e2 e3 => do
-    let t' ← fresh -- the final output type
-    let (t1, C1 )← infer e1 Γ
-    let (t2, C2) ← infer e2 Γ
-    let (t3, C3) ← infer e3 Γ
-    let C := [
-      (t1, [ty| bool]),
-      (t2, [ty| ?(t')]),
-      (t3, [ty| ?(t')])
-    ]
-    return ([ty| ?(t')], C1 ++ C2 ++ C3 ++ C)
-  | expr.lam name e => do
-    let t' ← fresh
-    let (t1, C) ← infer e (Γ.update name [ty| ?(t')])
-    return ([ty| ?(t') -> ~(t1)], C)
-  | expr.apply f inp => do
-    let t' ← fresh
-    let (t1, C1) ← infer f Γ
-    let (t2, C2) ← infer inp Γ
-    let C := [(t1, [ty| ~(t2) -> ?(t')])]
-    return ([ty| ?(t')], C1 ++ C2 ++ C)
+  def runInfer (e : expr) (Γ : env := initialEnv) : Except ErrorT (var_type × List Constraint) :=
+    (infer e Γ).run' 0
 
-def runInfer (e : expr) (Γ : env := initialEnv) : Except ErrorT (var_type × List Constraint) :=
-  (infer e Γ).run' 0
+end constraints
 
+section unification
 
--- substitution {subst / var}, e.g. {int → int / 't}
-structure Substitution where
-  subst : var_type
-  var : Nat
-deriving DecidableEq, BEq
-instance : ToString Substitution where
-  toString s := "{" ++ toString s.subst ++ " / ?" ++ toString s.var ++ "}"
-instance : Repr Substitution := ⟨fun s _ => toString s⟩
+  -- substitution {subst / var}, e.g. {int → int / 't}
+  abbrev SingleSubst := var_type × Nat
+  abbrev Substitution := List SingleSubst
+  -- structure Substitution where
+  --   subst : var_type
+  --   var : Nat
+  -- deriving DecidableEq, BEq
+  -- instance : ToString Substitution where
+  --   toString s := "{" ++ toString s.subst ++ " / ?" ++ toString s.var ++ "}"
+  -- instance : Repr Substitution := ⟨fun s _ => toString s⟩
 
-def applySubst (s : Substitution) (into : var_type) : var_type :=
-  match into with
-  | .base (.var x) => if x = s.var then s.subst else into
-  | .arrow t1 t2 => .arrow (applySubst s t1) (applySubst s t2)
-  | _ => into
+  def applySingleSubst (s : SingleSubst) (into : var_type) : var_type :=
+    match into with
+    | .base (.var x) => if x = s.2 then s.1 else into
+    | .arrow t1 t2 => .arrow (applySingleSubst s t1) (applySingleSubst s t2)
+    | _ => into
+  def applySubst (S : Substitution) (into : var_type) : var_type :=
+    S.foldl (fun acc s => applySingleSubst s acc) into
 
-def applySubstConstraints (s : Substitution) (into : List Constraint) : List Constraint :=
-  into.map (fun c => (applySubst s c.1, applySubst s c.2))
+  def applySubstConstraints (S : Substitution) (into : List Constraint) : List Constraint :=
+    into.map (fun c => (applySubst S c.1, applySubst S c.2))
 
-def applySubstAll (S : List Substitution) (into : var_type) : var_type :=
-  S.foldl (fun acc s => applySubst s acc) into
+  -- -- total number of nodes in the tree
+  -- def sizeT : var_type → Nat
+  --   | .base _ => 1
+  --   | .arrow a b => 1 + sizeT a + sizeT b
 
--- -- total number of nodes in the tree
--- def sizeT : var_type → Nat
---   | .base _ => 1
---   | .arrow a b => 1 + sizeT a + sizeT b
+  -- -- sizeT summed over a list of constraints
+  -- def sizeC (c : List Constraint) : Nat :=
+  --   let sizes := c.map (fun c => sizeT c.1 + sizeT c.2)
+  --   sizes.sum
 
--- -- sizeT summed over a list of constraints
--- def sizeC (c : List Constraint) : Nat :=
---   let sizes := c.map (fun c => sizeT c.1 + sizeT c.2)
---   sizes.sum
+  -- def varsOf : var_type → List Nat
+  --   | .base (.var x) => [x]
+  --   | .arrow t1 t2 => varsOf t1 ++ varsOf t2
+  --   | _ => []
 
--- def varsOf : var_type → List Nat
---   | .base (.var x) => [x]
---   | .arrow t1 t2 => varsOf t1 ++ varsOf t2
---   | _ => []
+  -- theorem varOf_applySubst (s : Substitution) (into : var_type) :
+  --   varsOf (applySubst s into) ⊆ (varsOf into).erase s.var
 
--- theorem varOf_applySubst (s : Substitution) (into : var_type) :
---   varsOf (applySubst s into) ⊆ (varsOf into).erase s.var
+  -- def distinctVarsT (t : var_type) : Nat := (varsOf t).eraseDups.length
 
--- def distinctVarsT (t : var_type) : Nat := (varsOf t).eraseDups.length
+  -- def distinctVarsC (C : List Constraint) : Nat :=
+  --   (C.map (fun c => distinctVarsT c.1 + distinctVarsT c.2)).sum -- TODO: completely wrong lol
 
--- def distinctVarsC (C : List Constraint) : Nat :=
---   (C.map (fun c => distinctVarsT c.1 + distinctVarsT c.2)).sum -- TODO: completely wrong lol
+  partial def unify (C: List Constraint) : UnifyM Substitution :=
+    match C with
+    | [] => do return []
+    | (t1, t2) :: C' =>
+      let bindVar (x : Nat) (t : var_type) (C' : List Constraint): UnifyM Substitution :=
+        if occurs x t then throw ErrorT.fail else do
+          let S := [(t, x)]
+          let S' ← unify (applySubstConstraints S C')
+          return S ++ S'
+      match t1, t2 with
+      -- identical variables / identical constants: nothing to learn
+      | .base (.var x), .base (.var y) =>
+        if x = y then unify C' else bindVar x t2 C'
+      | .base (.const a), .base (.const b) =>
+        if a = b then unify C' else throw ErrorT.fail
+      -- a variable = anything else
+      | .base (.var x), t | t, .base (.var x) => bindVar x t C'
+      -- reduce
+      | .arrow t1 t2, .arrow t3 t4 =>
+        unify ((t1, t3) :: (t2, t4) :: C') -- push the two reduced constraints
+      | _, _ => throw ErrorT.fail
 
-partial def unify (C: List Constraint) : UnifyM (List Substitution) :=
-  match C with
-  | [] => do return []
-  | (t1, t2) :: tail =>
-    let bindVar (x : Nat) (t : var_type) (tail : List Constraint): UnifyM (List Substitution) :=
-      if occurs x t then throw ErrorT.fail else do
-        let s := { subst := t, var := x }
-        let St ← unify (applySubstConstraints s tail)
-        return s :: St
-    match t1, t2 with
-    -- identical variables / identical constants: nothing to learn
-    | .base (.var x), .base (.var y) =>
-      if x = y then unify tail else bindVar x t2 tail
-    | .base (.const a), .base (.const b) =>
-      if a = b then unify tail else throw ErrorT.fail
-    -- a variable = anything else
-    | .base (.var x), t | t, .base (.var x) => bindVar x t tail
-    -- reduce
-    | .arrow t1 t2, .arrow t3 t4 =>
-      unify ((t1, t3) :: (t2, t4) :: tail) -- push the two reduced constraints
-    | _, _ => throw ErrorT.fail
+end unification
 
 def inferAndSolve (e : expr) (Γ : env := initialEnv) : Except ErrorT var_type := do
   let inferred ← runInfer e Γ
   let (t', constraints) := inferred
   let unified ← unify constraints
-  let solved := applySubstAll unified t'
+  let solved := applySubst unified t'
   return solved
 
 /- end to end tests -/
