@@ -235,13 +235,6 @@ section unification
   -- substitution {subst / var}, e.g. {int → int / 't}
   abbrev SingleSubst := var_type × Nat
   abbrev Substitution := List SingleSubst
-  -- structure Substitution where
-  --   subst : var_type
-  --   var : Nat
-  -- deriving DecidableEq, BEq
-  -- instance : ToString Substitution where
-  --   toString s := "{" ++ toString s.subst ++ " / ?" ++ toString s.var ++ "}"
-  -- instance : Repr Substitution := ⟨fun s _ => toString s⟩
 
   def applySingleSubst (s : SingleSubst) (into : var_type) : var_type :=
     match into with
@@ -304,8 +297,8 @@ end unification
 def inferAndSolve (e : expr) (Γ : env := initialEnv) : Except ErrorT var_type := do
   let inferred ← runInfer e Γ
   let (t', constraints) := inferred
-  let unified ← unify constraints
-  let solved := applySubst unified t'
+  let subst ← unify constraints
+  let solved := applySubst subst t'
   return solved
 
 /- end to end tests -/
