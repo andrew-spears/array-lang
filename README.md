@@ -2,8 +2,16 @@
 
 TODO:
 
-- allow let _ in _ constructs
-- move plus and const types to the env, rather than the inference function
+Short term
+
+- rename Nats to MetaVar in appropriate places
+- rename var_type to metaType or something
+- replace Option with Error monad in appropriate places
+- instantiate function
+- rename InferM?
+
+Long term
+
 - dependent typing
 - prove termination of unify
 - either prove correctness or make a more robust testing mechanism

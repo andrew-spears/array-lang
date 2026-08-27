@@ -92,6 +92,12 @@ inductive ErrorT where
 | fail
 deriving Repr, DecidableEq, BEq
 abbrev Error := Except ErrorT
+abbrev fail {α} : Error α := Except.error ErrorT.fail
+instance [BEq ε] [BEq α] : BEq (Except ε α) where
+  beq
+    | .ok a, .ok b => a == b
+    | .error a, .error b => a == b
+    | _, _ => false
 abbrev InferM := StateT TVar Error -- Monad to thread the next fresh type var, along with failures
 
 inductive TypeAtom where -- leaves of an OpenType
@@ -102,7 +108,6 @@ deriving DecidableEq, BEq, Repr
 abbrev OpenType  := type TypeAtom   -- may contain TVars; what inference works with
 abbrev GroundType := type BaseType     -- no variables; a finished, concrete type
 
--- all TVars occurring in a type
 def type.tvars (t : OpenType) : List TVar :=
   match t with
   | .base (.var x) => [x]
@@ -212,15 +217,13 @@ def fresh : InferM TVar := do
   let n ← get
   set (n + 1)
   return n
-
--- type variable occurs in type expression
 def occurs (v : TVar) (e : OpenType) : Bool :=
   match e with
   | .base (.var x) => x = v
   | .arrow t1 t2 => (occurs v t1) ∨ (occurs v t2)
   | _ => false
 
--- environment = a mapping from variables to their types. can be variable
+-- environment = a mapping from variables to their types (implicitly TypeSchemes)
 structure Env where
   lookup : Var → Option TypeScheme
   domain : List Var
@@ -243,17 +246,9 @@ abbrev Env.extendInitial (Γ : Env) := initialEnv.union Γ
 
 /- substitution {subst / var}, e.g. {int → int / 't}. -/
 abbrev Subst := TVar → Option OpenType
--- deriving Nonempty
 abbrev Subst.empty : Subst := λ _ => none
 abbrev Subst.singleton (x : TVar) (t : OpenType): Subst :=
   λ y => if x=y then some t else none
-
--- def Subst.toString (S : Subst) : String :=
---   let bindings := S.domain.eraseDups.filterMap λ x =>
---     (S.mapping x).map λ t => s!"{t} / ?{x}"
---   "{" ++ String.intercalate ", " bindings ++ "}"
--- instance : ToString Subst := ⟨Subst.toString⟩
--- instance : Repr Subst := ⟨λ S _ => Subst.toString S⟩
 
 def type.subst (t : OpenType) (S : Subst) : OpenType :=
   match t with
@@ -269,16 +264,10 @@ abbrev Subst.compose (S S' : Subst) : Subst := -- apply right to left
   | some t => t.subst S
 abbrev Subst.update (S : Subst) (x : TVar) (t : OpenType) : Subst := -- compose by adding to the left
   (Subst.singleton x t).compose S
-abbrev Subst.ofList (L : List (TVar × OpenType)) : Subst :=
+abbrev Subst.sequential (L : List (TVar × OpenType)) : Subst :=
   L.foldr (λ (x, t) S => S.update x t) Subst.empty -- TODO: this is backwards from convention?
-
-def s1 := Subst.singleton 1 [ty| ?2]
-def s2 := Subst.singleton 2 [ty| ?3]
-def s3 := s2.compose s1
-def s4 := s1.update 2 [ty| ?3]
-#eval s4 2
-def s5 := (Subst.ofList [(2, [ty| ?3]), (1, [ty| ?2])])
-#eval s5 1
+abbrev Subst.parallel (L : List (TVar × OpenType)) : Subst :=
+  λ x => L.lookup x
 
 /- Subst should never overwrite a bound variable (generalize should prevent this too) -/
 def TypeScheme.subst (σ : TypeScheme) (S : Subst) : TypeScheme :=
@@ -287,7 +276,6 @@ def Env.subst (Γ : Env) (S : Subst) : Env :=
   { lookup := λ name => (Γ.lookup name).map (·.subst S),
     domain := Γ.domain }
 
--- a constraint of the form 't1 = 't2
 abbrev Constraint := OpenType × OpenType
 def Constraint.subst (c : Constraint) (S : Subst) : Constraint :=
   (c.1.subst S, c.2.subst S)
@@ -300,7 +288,7 @@ partial def unify (C: List Constraint) : Error Subst :=
   | (t1, t2) :: C' =>
     let bindVar (x : TVar) (t : OpenType) (C' : List Constraint): Error Subst :=
       if occurs x t then throw ErrorT.fail else do
-        let S := Subst.ofList [(x, t)]
+        let S := Subst.singleton x t
         let S' ← unify (substConstraints C' S)
         return S'.compose S
     match t1, t2 with
@@ -322,7 +310,7 @@ def instantiate (σ : TypeScheme) : InferM OpenType := do
     let b' ← fresh
     return (a', [ty| ?(b')])
   )
-  let S := Subst.ofList fresh_vars
+  let S := Subst.parallel fresh_vars
   return σ.body.subst S
 
 -- generalize [name] into a universally quantified variable, return the modified env
@@ -379,87 +367,96 @@ def runBuildConstraints (e : Expr) (Γ : Env := initialEnv) : Error (OpenType ×
   (buildConstraints e Γ).run' 0
 
 
+-- reduce open TVars like ?2 down to the lowest distinct naturals
+def lowerTVars (t : OpenType) : OpenType :=
+  let rn := t.tvars.zipIdx
+  t.subst (fun x => (rn.lookup x).map (fun i => [ty| ?(i)]))
 
 -- top level function, returns the inferred type
 def inferAndSolve (e : Expr) (Γ : Env := initialEnv) : Error OpenType := do
   let (t', constraints)  ← runBuildConstraints e Γ
   let subst ← unify constraints
   let solved := t'.subst subst
-  return solved
+  let lowered := lowerTVars solved
+  return lowered
 
-/- end to end tests -/
+section testing
+  /- end to end tests -/
 
-def test_env := Env.extendInitial <| Env.ofList [
-  ("x", [ty| nat]),
-  ("y", [ty| nat]),
-  ("b1", [ty| bool]),
-  ("b2", [ty| bool]),
-  ("f", [ty| nat -> nat]),
-  ("g", [ty| nat -> nat]),
-  ("h", [ty| nat -> nat -> nat]),
-  ("nb", [ty| nat -> bool]),
-  ("bn", [ty| bool -> nat]),
-  ("bb", [ty| bool -> bool])
-]
-#eval inferAndSolve [lang| 3] test_env -- nat
-#eval inferAndSolve [lang| true] test_env -- bool
-#eval inferAndSolve [lang| 3 + x]  test_env -- nat
+  def test_env := Env.extendInitial <| Env.ofList [
+    ("x", [ty| nat]),
+    ("y", [ty| nat]),
+    ("b1", [ty| bool]),
+    ("b2", [ty| bool]),
+    ("f", [ty| nat -> nat]),
+    ("g", [ty| nat -> nat]),
+    ("h", [ty| nat -> nat -> nat]),
+    ("nb", [ty| nat -> bool]),
+    ("bn", [ty| bool -> nat]),
+    ("bb", [ty| bool -> bool])
+  ]
 
+  macro "#test " e:term " : " t:term : command => `(
+    #eval (do
+      let expected : Error OpenType := $t
+      let actual := inferAndSolve $e test_env
+      if actual == expected then pure ()
+      else throw (IO.userError s!"expected {repr expected}, got {repr actual}")
+      : IO Unit)
+  )
 
+  #test [lang| f x] : (Except.ok [ty| nat])
+  #test [lang| f (g x)] : (.ok [ty| nat])
+  #test [lang| h x y] : (.ok [ty| nat])
+  #test [lang| nb (h x y)] : (.ok [ty| bool])
+  #test [lang| bn (nb (h x y))] : (.ok [ty| nat])
+  #test [lang| false y] : fail
+  #test [lang| fun x => x + 1] : (.ok [ty| nat -> nat])
+  #test [lang| if b1 then y else 3] : (.ok [ty| nat])
+  #test [lang| fun x' => if x' then 1 else 0] : (.ok [ty| bool -> nat])
+  #test [lang| (fun x' => x' + 1) 5] : (.ok [ty| nat])
+  #test [lang| (fun f' => fun x' => f' (x' + 1))] : (.ok [ty| (nat -> ?0) -> nat -> ?0])
+  #test [lang| (let id = fun x => x in id)] : (.ok [ty| ?0 -> ?0])
+  #test [lang| (let id = fun x => x in id true)] : (.ok [ty| bool])
+  #test [lang| (let id = fun x => x in id 3)] : (.ok [ty| nat])
 
-#eval inferAndSolve [lang| f x] test_env -- nat
-#eval inferAndSolve [lang| f (g x)] test_env -- nat
-#eval inferAndSolve [lang| h x y] test_env -- nat
-#eval inferAndSolve [lang| nb (h x y)] test_env -- bool
-#eval inferAndSolve [lang| bn (nb (h x y))] test_env -- nat
-#eval inferAndSolve [lang| false y] test_env -- fail
-#eval inferAndSolve [lang| fun x => x + 1] test_env -- nat → nat
-#eval inferAndSolve [lang| if b1 then y else 3] test_env -- nat
-#eval inferAndSolve [lang| fun x => if x then 1 else 0] test_env -- bool → nat
-#eval inferAndSolve [lang| (fun x => x + 1) 5] test_env -- nat
-#eval inferAndSolve [lang| (fun f => fun x => f (x + 1))] initialEnv -- (nat -> ?) -> nat -> ?
-#eval inferAndSolve [lang| (let id = fun x => x in id)] initialEnv -- ? -> ?
-#eval inferAndSolve [lang| (let id = fun x => x in id true)] initialEnv -- bool
-#eval inferAndSolve [lang| (let id = fun x => x in id 3)] initialEnv -- nat
+  /- let-polymorphism -/
+  #test [lang| let x' = 3 in x'] : (.ok [ty| nat])
+  #test [lang| let x' = 3 in let y' = true in y'] : (.ok [ty| bool])
+  #test [lang| let x' = 3 in x' + 1] : (.ok [ty| nat])
+  #test [lang| let f' = fun x' => x' + 1 in f' 3] : (.ok [ty| nat])
+  #test [lang| let f' = fun x' => x' + 1 in f' true] : fail
 
-/- let-polymorphism -/
-#eval inferAndSolve [lang| let x = 3 in x] initialEnv -- nat
-#eval inferAndSolve [lang| let x = 3 in let y = true in y] initialEnv -- bool
-#eval inferAndSolve [lang| let x = 3 in x + 1] initialEnv -- nat
-#eval inferAndSolve [lang| let f = fun x => x + 1 in f 3] initialEnv -- nat
-#eval inferAndSolve [lang| let f = fun x => x + 1 in f true] initialEnv -- fail
+  -- the point of generalization: one binding used at two different types
+  #test [lang| let id = fun x => x in let a = id 0 in id true] : (.ok [ty| bool])
+  #test [lang| let id = fun x => x in if id true then id 1 else 0] : (.ok [ty| nat])
+  #test [lang| let id = fun x => x in (id (id 3))] : (.ok [ty| nat])
+  #test [lang| let id = fun x => x in fun z => id z] : (.ok [ty| ?0 -> ?0])
+  #test [lang| let id = fun x => x in fun z => id (id z)] : (.ok [ty| ?0 -> ?0])
 
--- the point of generalization: one binding used at two different types
-#eval inferAndSolve [lang| let id = fun x => x in let a = id 0 in id true] initialEnv -- bool
-#eval inferAndSolve [lang| let id = fun x => x in if id true then id 1 else 0] initialEnv -- nat
-#eval inferAndSolve [lang| let id = fun x => x in (id (id 3))] initialEnv -- nat
-#eval inferAndSolve [lang| let id = fun x => x in fun z => id z] initialEnv -- ?a -> ?a
-#eval inferAndSolve [lang| let id = fun x => x in fun z => id (id z)] initialEnv -- ?a -> ?a
+  -- contrast: lambda-bound is NOT generalized, so this must fail
+  #test [lang| fun id => if id true then id 1 else 0] : fail
 
--- contrast: lambda-bound is NOT generalized, so this must fail
-#eval inferAndSolve [lang| fun id => if id true then id 1 else 0] initialEnv -- fail
+  /- generalizing multiple variables -/
+  #test [lang| let k = fun a => fun b => a in k 3 true] : (.ok [ty| nat])
+  #test [lang| let k = fun a => fun b => a in k true 3] : (.ok [ty| bool])
+  #test [lang| let k = fun a => fun b => a in k] : (.ok [ty| ?0 -> ?1 -> ?0])
+  #test [lang| let ap = fun f' => fun v => f' v in ap (fun n => n + 1) 5] : (.ok [ty| nat])
+  #test [lang| let ap = fun f' => fun v => f' v in ap] : (.ok [ty| (?0 -> ?1) -> ?0 -> ?1])
 
-/- generalizing multiple variables -/
-#eval inferAndSolve [lang| let k = fun a => fun b => a in k 3 true] initialEnv -- nat
-#eval inferAndSolve [lang| let k = fun a => fun b => a in k true 3] initialEnv -- bool
-#eval inferAndSolve [lang| let k = fun a => fun b => a in k] initialEnv -- ?a -> ?b -> ?a
-#eval inferAndSolve [lang| let ap = fun f => fun v => f v in ap (fun n => n + 1) 5] initialEnv -- nat
-#eval inferAndSolve [lang| let ap = fun f => fun v => f v in ap] initialEnv -- (?a -> ?b) -> ?a -> ?b
-
-/- variables free in the env must NOT be generalized -/
-#eval inferAndSolve [lang| fun y => let f = fun z => y in f 3] initialEnv -- ?a -> ?a
-#eval inferAndSolve [lang| fun y => let f = fun z => y in if f 3 then f 0 else 1] initialEnv -- fail
-#eval inferAndSolve [lang| fun y => let f = fun z => y in (f 3) + (f true)] initialEnv -- nat -> nat
-#eval inferAndSolve [lang| fun y => let f = fun z => y in if y then f 3 else f true] initialEnv -- bool -> bool
-
-
-/- nesting and shadowing -/
-#eval inferAndSolve [lang| let id = fun x => x in let id2 = id in id2 true] initialEnv -- bool
-#eval inferAndSolve [lang| let x = 3 in let x = true in x] initialEnv -- bool
-#eval inferAndSolve [lang| let f = fun x => x in let g = fun y => f y in g 3] initialEnv -- nat
-#eval inferAndSolve [lang| let c = fun a => fun b => a + b in c 1 2] initialEnv -- nat
-#eval inferAndSolve [lang| let b = true in if b then let n = 1 in n else 0] initialEnv -- nat
+  /- variables free in the env must NOT be generalized -/
+  #test [lang| fun y' => let f' = fun z => y' in f' 3] : (.ok [ty| ?0 -> ?0])
+  #test [lang| fun y' => let f' = fun z => y' in if f' 3 then f' 0 else 1] : fail
+  #test [lang| fun y' => let f' = fun z => y' in (f' 3) + (f' true)] : (.ok [ty| nat -> nat])
+  #test [lang| fun y' => let f' = fun z => y' in if y' then f' 3 else f' true] : (.ok [ty| bool -> bool])
 
 
+  /- nesting and shadowing -/
+  #test [lang| let id = fun x => x in let id2 = id in id2 true] : (.ok [ty| bool])
+  #test [lang| let x' = 3 in let x' = true in x'] : (.ok [ty| bool])
+  #test [lang| let f' = fun x => x in let g' = fun y => f' y in g' 3] : (.ok [ty| nat])
+  #test [lang| let c = fun a => fun b => a + b in c 1 2] : (.ok [ty| nat])
+  #test [lang| let b = true in if b then let n = 1 in n else 0] : (.ok [ty| nat])
 
+end testing
 end hindley_milner
