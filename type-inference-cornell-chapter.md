@@ -1103,6 +1103,17 @@ give to `x` is then `'a1 ... 'an . u1`.
 
 Putting all that together, we end up with:
 
+(annotation)
+
+```text
+generalize(C1, env, x : t1) =
+  let S := unify C1
+  let u1 := t1 S
+  let env1 := env S
+  let 'a1 ... 'an := varsOf (u1) - varsOf (env1)
+  env1, x : 'a1 ... 'an . u1
+```
+
 ```text
 generalize(C1, env, x : t1) =
   env1, x : 'a1 ... 'an . u1
@@ -1114,6 +1125,26 @@ discovers no new equalities from the environment, so `u1 = 'a -> 'a` and
 `env1 = {}`. The only type variable in `u1` is `'a`, and it doesn't appear in
 `env1`. So `'a` is generalized, yielding `'a . 'a -> 'a` as the type scheme for
 `id`.
+
+(annotation)
+
+valid type schemes:
+forall a, nat ... simplifies to nat
+forall a, a -> nat
+forall a b, a -> a ... simplifies to forall a, a -> a
+
+invalid type schemes:
+forall a, b -> b
+b -> b
+
+every variable in the type must appear in the type scheme vars
+
+difference between type scheme and metavariable type expressions
+
+```
+(fun f -> (f 0, f true)) (fun x -> x)     -- rejected by HM
+let f = fun x -> x in (f 0, f true)       -- accepted
+```
 
 ## Polymorphism and Mutability
 

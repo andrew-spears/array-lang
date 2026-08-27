@@ -222,3 +222,17 @@ int -> int = int -> int
 ```
 
 done
+
+## Let and polymorphism
+
+```
+{} |- let id = fun x -> x in (let a = id 0 in id true) : 'c
+    {} |- fun x -> x : 'a -> 'a -| {} <--- We found that id : 'a -> 'a as intended
+        {x : 'a} |- x : 'a -| {}
+    --- now use that in the env
+    {id : 'a -> 'a} |- let a = id 0 in id true : 'c -| {'a -> 'a = int -> 'b, 'a -> 'a = bool -> 'c}
+        {id : 'a -> 'a} |- id 0 : 'b -| {'a -> 'a = int -> 'b} <--- already an issue; we assert that id 'a must be int because it was applied to an int
+
+        {id : 'a -> 'a, a : 'b} |- id true : 'c -| {'a -> 'a = int -> 'b}
+
+```
