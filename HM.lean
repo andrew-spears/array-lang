@@ -373,7 +373,7 @@ def lowerTVars (t : OpenType) : OpenType :=
   t.subst (fun x => (rn.lookup x).map (fun i => [ty| ?(i)]))
 
 -- top level function, returns the inferred type
-def inferAndSolve (e : Expr) (Γ : Env := initialEnv) : Error OpenType := do
+def infer (e : Expr) (Γ : Env := initialEnv) : Error OpenType := do
   let (t', constraints)  ← runBuildConstraints e Γ
   let subst ← unify constraints
   let solved := t'.subst subst
@@ -399,7 +399,7 @@ section testing
   macro "#test " e:term " : " t:term : command => `(
     #eval (do
       let expected : Error OpenType := $t
-      let actual := inferAndSolve $e test_env
+      let actual := infer $e test_env
       if actual == expected then pure ()
       else throw (IO.userError s!"expected {repr expected}, got {repr actual}")
       : IO Unit)
