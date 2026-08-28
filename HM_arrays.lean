@@ -9,16 +9,15 @@ inductive type (baseType : Type) where
 | arrow : type baseType → type baseType → type baseType
 deriving DecidableEq, BEq, Repr
 
-namespace simple
-  /- A simple syntax to write expressions. No dependent types.
-  purely for testing our HM implementation. This language allows some nonsense
-  expressions like `3 + false`, but which a user might write and we have to
-  be able to parse and attempt to typecheck. -/
+namespace arr
+  /- A language with array objects. types specify array shapes
+  only allow 2d matrices over integers
+  -/
 
   abbrev Var := String -- store vars as just their names
   inductive Const where
-  | nat (n : Nat)
   | bool (b : Bool)
+  | matrix (m n : Nat) -- this should really include the actual value, but im being lazy here
 
   inductive Expr where
   | const (c : Const)
@@ -29,14 +28,14 @@ namespace simple
   | let_in (name : String) (e1 e2 : Expr) -- let [name] = [e1] in [e2]
 
   inductive BaseType where
-  | nat
   | bool
+  | matrix (m n : Nat) -- type includes the shape now
   deriving DecidableEq, BEq, Repr
 
   def getType (c : Const) : BaseType := -- the canonical mapping of constants to their types
     match c with
-    | .nat _ => .nat
     | .bool _ => .bool
+    | .matrix m n => .matrix m n
 
 section simple_syntax
   /- Surface syntax, so we can write `[lang| fun x => if x then 1 else 0]`
@@ -44,6 +43,7 @@ section simple_syntax
   declare_syntax_cat lang
 
   syntax num : lang
+  syntax "(" num ", " num ")" : lang        -- matrix literal, e.g. (3, 2)
   syntax ident : lang
   syntax "(" lang ")" : lang
   syntax:100 lang:100 lang:101 : lang                 -- application, left assoc
@@ -52,12 +52,12 @@ section simple_syntax
   syntax:10 "if " lang " then " lang " else " lang:10 : lang
   syntax:10 "let " ident " = " lang " in " lang:10 : lang
 
+
   syntax "[lang| " lang "]" : term
 
   macro_rules
-  | `([lang| $n:num])            => `(Expr.const (Const.nat $n))
+  | `([lang| ($m:num, $n:num)])  => `(Expr.const (Const.matrix $m $n))
   | `([lang| $x:ident])          =>
-    -- `true`/`false` are keywords of the object language, not variables
     match x.getId.toString with
     | "true"  => `(Expr.const (Const.bool true))
     | "false" => `(Expr.const (Const.bool false))
@@ -70,21 +70,19 @@ section simple_syntax
   | `([lang| let $x = $e1 in $e2]) => `(Expr.let_in $(Lean.quote x.getId.toString) [lang| $e1] [lang| $e2])
 
   -- examples
-  #check [lang| 3]
-  #check [lang| true]
-  #check [lang| 3 + x]
+  #check [lang| (3, 2)]
   #check [lang| f x y]                          -- application is left assoc: (f x) y
   #check [lang| false y]                        -- parses fine, fails typechecking later
-  #check [lang| fun x => x + 1]
-  #check [lang| if x then y else 3]
-  #check [lang| fun x => if x then 1 else 0]
-  #check [lang| (fun x => x + 1) 5]
-  #check [lang| let x = 3 in x]
-  #check [lang| let x = 1 in fun y => y + x]
+  #check [lang| fun x => (2, 2)]
+  #check [lang| if x then y else (1, 1)]
+  #check [lang| fun x => if x then (2, 2) else (2, 2)]
+  #check [lang| (fun x => x) (3, 3)]
+  #check [lang| let x = (2, 3) in x]
+  #check [lang| let x = (5, 5) in fun y => y + x]
 end simple_syntax
-end simple
+end arr
 
-open simple
+open arr
 
 
 /- HM Algorithm -/
@@ -105,7 +103,7 @@ instance [BEq ε] [BEq α] : BEq (Except ε α) where
 abbrev InferM := StateT TVar Error -- Monad to thread the next fresh type var, along with failures
 
 inductive TypeAtom where -- leaves of an OpenType
-| const : BaseType → TypeAtom -- known type, nat or bool
+| const : BaseType → TypeAtom -- known type
 | var : TVar → TypeAtom -- unknown TVar, e.g. 't1
 deriving DecidableEq, BEq, Repr
 
@@ -137,8 +135,8 @@ section open_type_syntax
   instead of nesting constructors. `->` is right assoc, as usual. -/
   declare_syntax_cat ty
 
-  syntax "nat" : ty
   syntax "bool" : ty
+  syntax "(" num ", " num ")" : ty                -- matrix of shape m, n
   syntax "?" num : ty                             -- type variable, e.g. ?0
   syntax "?" "(" term ")" : ty                    -- type variable from a runtime Nat, e.g. ?(t')
   syntax "~" "(" term ")" : ty                    -- splice in a whole OpenType, e.g. ~(t1)
@@ -148,26 +146,26 @@ section open_type_syntax
   syntax "[ty| " ty "]" : term
 
   macro_rules
-  | `([ty| nat])        => `(type.base (TypeAtom.const BaseType.nat))
   | `([ty| bool])       => `(type.base (TypeAtom.const BaseType.bool))
+  | `([ty| ($m:num, $n:num)])       => `(type.base (TypeAtom.const (BaseType.matrix $m $n)))
   | `([ty| ?$n:num])    => `(type.base (TypeAtom.var $n))
   | `([ty| ?($t:term)]) => `(type.base (TypeAtom.var $t))
   | `([ty| ~($t:term)]) => `($t)
   | `([ty| ($t)])       => `([ty| $t])
   | `([ty| $a -> $b])   => `(type.arrow [ty| $a] [ty| $b])
 
-  #check [ty| nat]
-  #check [ty| nat -> bool]
+  #check [ty| bool]
+  #check [ty| (2, 3)]
   #check [ty| ?0 -> ?1 -> ?0]                     -- right assoc: ?0 -> (?1 -> ?0)
-  #check [ty| (nat -> bool) -> ?2]
+  #check [ty| ((2, 3) -> bool) -> ?2]
 
   /- Print types back in the `[ty| ...]` surface syntax rather than as raw
   constructors, so `#eval` output is readable. Parenthesise the left side of an
   arrow only, since `->` is right assoc. -/
   instance : ToString BaseType where
     toString
-      | BaseType.nat => "nat"
       | BaseType.bool => "bool"
+      | BaseType.matrix m n => s!"({m}, {n})"
 
   instance : ToString TypeAtom where
     toString
@@ -185,9 +183,9 @@ section open_type_syntax
   instance [ToString α] : ToString (type α) := ⟨type.toString⟩
   instance [ToString α] : Repr (type α) := ⟨fun t _ => type.toString t⟩
 
-  #eval [ty| nat -> bool]
+  #eval [ty| (2, 3) -> (3, 4)]
   #eval [ty| ?0 -> ?1 -> ?0]
-  #eval [ty| (nat -> bool) -> ?2]
+  #eval [ty| ((1, 1) -> bool) -> ?2]
 
     /- Surface syntax for type schemes: `[sch| forall ?0 ?1, ?0 -> ?1]`, or
   `[sch| nat -> bool]` for a monomorphic one (empty binder list). -/
@@ -210,8 +208,8 @@ section open_type_syntax
 
   #eval [sch| forall ?0, ?0 -> ?0]              -- the identity function's scheme
   #eval [sch| forall ?0 ?1, ?0 -> ?1 -> ?0]     -- fun x y => x
-  #eval [sch| nat -> bool]                      -- monomorphic, bound = []
-  #eval [sch| forall ?0, nat]                   -- representable but generalize won't build it
+  #eval [sch| (2, 2) -> ?3]                       -- monomorphic, bound = []
+  #eval [sch| forall ?0, (4, 4)]                   -- representable but generalize won't build it
 
 end open_type_syntax
 
@@ -245,7 +243,7 @@ def Env.free (Γ : Env) :=
   (Γ.domain.filterMap Γ.lookup).flatMap TypeScheme.free |>.eraseDups
 
 -- initial environment with types of built-ins
-abbrev initialEnv := Env.ofList [("+", [sch| nat -> nat -> nat])]
+abbrev initialEnv := Env.ofList [("+", [sch| (2, 2) -> (2, 2) -> (2, 2)])] -- for now. Should really be forall m n, (m, n) -> (m, n) -> (m, n)
 abbrev Env.extendInitial (Γ : Env) := initialEnv.union Γ
 
 /- substitution {subst / var}, e.g. {int → int / 't}. -/
@@ -387,15 +385,15 @@ section testing
   /- end to end tests -/
 
   def test_env := Env.extendInitial <| Env.ofList [
-    ("x", [ty| nat]),
-    ("y", [ty| nat]),
+    ("x", [ty| (2, 2)]),
+    ("y", [ty| (2, 2)]),
     ("b1", [ty| bool]),
     ("b2", [ty| bool]),
-    ("f", [ty| nat -> nat]),
-    ("g", [ty| nat -> nat]),
-    ("h", [ty| nat -> nat -> nat]),
-    ("nb", [ty| nat -> bool]),
-    ("bn", [ty| bool -> nat]),
+    ("f", [ty| (2, 2) -> (2, 2)]),
+    ("g", [ty| (2, 2) -> (2, 2)]),
+    ("h", [ty| (2, 2) -> (2, 2) -> (2, 2)]),
+    ("nb", [ty| (2, 2) -> bool]),
+    ("bn", [ty| bool -> (2, 2)]),
     ("bb", [ty| bool -> bool])
   ]
 
@@ -408,58 +406,58 @@ section testing
       : IO Unit)
   )
 
-  #test [lang| f x] : (Except.ok [ty| nat])
-  #test [lang| f (g x)] : (.ok [ty| nat])
-  #test [lang| h x y] : (.ok [ty| nat])
+  #test [lang| f x] : (Except.ok [ty| (2, 2)])
+  #test [lang| f (g x)] : (.ok [ty| (2, 2)])
+  #test [lang| h x y] : (.ok [ty| (2, 2)])
   #test [lang| nb (h x y)] : (.ok [ty| bool])
-  #test [lang| bn (nb (h x y))] : (.ok [ty| nat])
+  #test [lang| bn (nb (h x y))] : (.ok [ty| (2, 2)])
   #test [lang| false y] : fail
-  #test [lang| fun x => x + 1] : (.ok [ty| nat -> nat])
-  #test [lang| if b1 then y else 3] : (.ok [ty| nat])
-  #test [lang| fun x' => if x' then 1 else 0] : (.ok [ty| bool -> nat])
-  #test [lang| (fun x' => x' + 1) 5] : (.ok [ty| nat])
-  #test [lang| (fun f' => fun x' => f' (x' + 1))] : (.ok [ty| (nat -> ?0) -> nat -> ?0])
+  #test [lang| fun x => x + 1] : (.ok [ty| (2, 2) -> (2, 2)])
+  #test [lang| if b1 then y else (2, 2)] : (.ok [ty| (2, 2)])
+  #test [lang| fun x' => if x' then (2, 2) else (2, 2)] : (.ok [ty| bool -> (2, 2)])
+  #test [lang| (fun x' => x' + (2, 2)) (2, 2)] : (.ok [ty| (2, 2)])
+  #test [lang| (fun f' => fun x' => f' (x' + (2, 2)))] : (.ok [ty| ((2, 2) -> ?0) -> (2, 2) -> ?0])
   #test [lang| (let id = fun x => x in id)] : (.ok [ty| ?0 -> ?0])
   #test [lang| (let id = fun x => x in id true)] : (.ok [ty| bool])
-  #test [lang| (let id = fun x => x in id 3)] : (.ok [ty| nat])
+  #test [lang| (let id = fun x => x in id (2, 2))] : (.ok [ty| (2, 2)])
 
   /- let-polymorphism -/
-  #test [lang| let x' = 3 in x'] : (.ok [ty| nat])
-  #test [lang| let x' = 3 in let y' = true in y'] : (.ok [ty| bool])
-  #test [lang| let x' = 3 in x' + 1] : (.ok [ty| nat])
-  #test [lang| let f' = fun x' => x' + 1 in f' 3] : (.ok [ty| nat])
-  #test [lang| let f' = fun x' => x' + 1 in f' true] : fail
+  #test [lang| let x' = (2, 2) in x'] : (.ok [ty| (2, 2)])
+  #test [lang| let x' = (2, 2) in let y' = true in y'] : (.ok [ty| bool])
+  #test [lang| let x' = (2, 2) in x' + (2, 2)] : (.ok [ty| (2, 2)])
+  #test [lang| let f' = fun x' => x' + (2, 2) in f' (2, 2)] : (.ok [ty| (2, 2)])
+  #test [lang| let f' = fun x' => x' + (2, 2) in f' true] : fail
 
   -- the point of generalization: one binding used at two different types
-  #test [lang| let id = fun x => x in let a = id 0 in id true] : (.ok [ty| bool])
-  #test [lang| let id = fun x => x in if id true then id 1 else 0] : (.ok [ty| nat])
-  #test [lang| let id = fun x => x in (id (id 3))] : (.ok [ty| nat])
+  #test [lang| let id = fun x => x in let a = id (2, 2) in id true] : (.ok [ty| bool])
+  #test [lang| let id = fun x => x in if id true then id (2, 2) else (2, 2)] : (.ok [ty| (2, 2)])
+  #test [lang| let id = fun x => x in (id (id (2, 2)))] : (.ok [ty| (2, 2)])
   #test [lang| let id = fun x => x in fun z => id z] : (.ok [ty| ?0 -> ?0])
   #test [lang| let id = fun x => x in fun z => id (id z)] : (.ok [ty| ?0 -> ?0])
 
   -- contrast: lambda-bound is NOT generalized, so this must fail
-  #test [lang| fun id => if id true then id 1 else 0] : fail
+  #test [lang| fun id => if id true then id (2, 2) else (2, 2)] : fail
 
   /- generalizing multiple variables -/
-  #test [lang| let k = fun a => fun b => a in k 3 true] : (.ok [ty| nat])
-  #test [lang| let k = fun a => fun b => a in k true 3] : (.ok [ty| bool])
+  #test [lang| let k = fun a => fun b => a in k (2, 2) true] : (.ok [ty| (2, 2)])
+  #test [lang| let k = fun a => fun b => a in k true (2, 2)] : (.ok [ty| bool])
   #test [lang| let k = fun a => fun b => a in k] : (.ok [ty| ?0 -> ?1 -> ?0])
-  #test [lang| let ap = fun f' => fun v => f' v in ap (fun n => n + 1) 5] : (.ok [ty| nat])
+  #test [lang| let ap = fun f' => fun v => f' v in ap (fun n => n + (2, 2)) (2, 2)] : (.ok [ty| (2, 2)])
   #test [lang| let ap = fun f' => fun v => f' v in ap] : (.ok [ty| (?0 -> ?1) -> ?0 -> ?1])
 
   /- variables free in the env must NOT be generalized -/
-  #test [lang| fun y' => let f' = fun z => y' in f' 3] : (.ok [ty| ?0 -> ?0])
-  #test [lang| fun y' => let f' = fun z => y' in if f' 3 then f' 0 else 1] : fail
-  #test [lang| fun y' => let f' = fun z => y' in (f' 3) + (f' true)] : (.ok [ty| nat -> nat])
-  #test [lang| fun y' => let f' = fun z => y' in if y' then f' 3 else f' true] : (.ok [ty| bool -> bool])
+  #test [lang| fun y' => let f' = fun z => y' in f' (2, 2)] : (.ok [ty| ?0 -> ?0])
+  #test [lang| fun y' => let f' = fun z => y' in if f' (2, 2) then f' (2, 2) else (2, 2)] : fail
+  #test [lang| fun y' => let f' = fun z => y' in (f' (2, 2)) + (f' true)] : (.ok [ty| (2, 2) -> (2, 2)])
+  #test [lang| fun y' => let f' = fun z => y' in if y' then f' (2, 2) else f' true] : (.ok [ty| bool -> bool])
 
 
   /- nesting and shadowing -/
   #test [lang| let id = fun x => x in let id2 = id in id2 true] : (.ok [ty| bool])
-  #test [lang| let x' = 3 in let x' = true in x'] : (.ok [ty| bool])
-  #test [lang| let f' = fun x => x in let g' = fun y => f' y in g' 3] : (.ok [ty| nat])
-  #test [lang| let c = fun a => fun b => a + b in c 1 2] : (.ok [ty| nat])
-  #test [lang| let b = true in if b then let n = 1 in n else 0] : (.ok [ty| nat])
+  #test [lang| let x' = (2, 2) in let x' = true in x'] : (.ok [ty| bool])
+  #test [lang| let f' = fun x => x in let g' = fun y => f' y in g' (2, 2)] : (.ok [ty| (2, 2)])
+  #test [lang| let c = fun a => fun b => a + b in c (2, 2) (2, 2)] : (.ok [ty| (2, 2)])
+  #test [lang| let b = true in if b then let n = (2, 2) in n else (2, 2)] : (.ok [ty| (2, 2)])
 
 end testing
 end hindley_milner
