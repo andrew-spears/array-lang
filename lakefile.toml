@@ -1,0 +1,10 @@
+name = "ArrayLang"
+version = "0.1.0"
+defaultTargets = ["ArrayLang"]
+
+[[lean_lib]]
+name = "ArrayLang"
+
+[[lean_exe]]
+name = "arraylang"
+root = "Main"

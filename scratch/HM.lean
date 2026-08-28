@@ -22,11 +22,11 @@ namespace simple
 
   inductive Expr where
   | const (c : Const)
-  | var (name : String)
-  | lam (name : String) (body : Expr)
+  | var (name : Var)
+  | lam (name : Var) (body : Expr)
   | if_else (e1 e2 e3 : Expr)
   | apply (f : Expr) (inp : Expr)
-  | let_in (name : String) (e1 e2 : Expr) -- let [name] = [e1] in [e2]
+  | let_in (name : Var) (e1 e2 : Expr) -- let [name] = [e1] in [e2]
 
   inductive BaseType where
   | nat

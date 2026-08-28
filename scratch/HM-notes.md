@@ -236,3 +236,137 @@ done
         {id : 'a -> 'a, a : 'b} |- id true : 'c -| {'a -> 'a = int -> 'b}
 
 ```
+
+## Dependent types
+
+Now suppose we have matrix types, so (3, 2) is the type of a 3x2 matrix.
+
+- has type (m : Nat) -> (n : Nat) -> (m, n) -> (m, n) -> (m, n)
+  where m and n are probably implicit.
+
+for example, if we know A : (2, 3), then A + B must have type (2, 3).
+
+or we could define a function `double : {m n : Nat} -> (m, n) -> (m, n)` which doubles the elements of a matrix A. Implicit inputs like this are really the same as universally quantified type variables:
+
+`forall m n, (m, n) -> (m, n)`
+
+except that m, n here have to be Nats, not types. This is actually quite distinct from what we did we let \_ in polymorphism. We need type schemes which allow things like
+
+`forall m n : Nat, (m, n) -> (m, n)`
+
+Lets try to infer the type of double A. Let
+`env = double : forall m n : Nat, (m, n) -> (m, n), A : (2, 3)`
+
+```
+env |- double A
+  fresh 't1
+  env |- double : ('m, 'n) -> ('m, 'n) -| {} -- gets instantiated to fresh variables
+  env |- A : (2, 3) -| {}
+: 't -| [('m, 'n) -> ('m, 'n) = (2, 3) -> 't]
+```
+
+now solving those constraints.
+
+```
+('m, 'n) -> ('m, 'n) = (2, 3) -> 't
+('m, 'n) = (2, 3), ('m, 'n) = 't
+```
+
+We also need a rule that says to split a constraint on shapes into constraints on dimensions, e.g. ('m, 'n) = (2, 3) becomes m = 2, n = 3. Maybe a more general rule - for a constraint where both sides use the same type constructor, all fields must be equal, or something like that.
+
+```
+'m = 2, 'n = 3, ('m, 'n) = 't
+subst 2 / 'm
+'n = 3, (2, 'n) = 't
+subst 3 / 'n
+(2, 3) = 't
+subst (2, 3) / 't
+```
+
+so we get {(2, 3) / 't, 3 / 'n, 2 / 'm}. makes sense.
+
+What about a function like matrix multiplication:
+
+`Dot : forall m n k : Nat, (m, n) -> (n, k) -> (m, k)`
+
+Lets try to infer Dot (Dot A B) C, where A : (2, 3) and C : (4, 5), but we know nothing about B.
+
+let `env = Dot : forall m n k : Nat, (m, n) -> (n, k) -> (m, k), A : (2, 3), C: (4, 5)`
+
+```
+env |- (Dot ((Dot A) B)) C
+    fresh t1
+    env |- Dot ((Dot A) B)
+        fresh t2
+        env |- Dot : (m1, n1) -> (n1, k1) -> (m1, k1)
+        env |- (Dot A) B
+            fresh t3
+            env |- Dot A
+                fresh t4
+                env |- Dot : (m2, n2) -> (n2, k2) -> (m2, k2) -| {}
+                env |- A : (2, 3) -| {}
+            : t4 -| [(m2, n2) -> (n2, k2) -> (m2, k2) = (2, 3) -> t4]
+            env |- B : fresh t5 -| {}
+        : t3 -| [(m2, n2) -> (n2, k2) -> (m2, k2) = (2, 3) -> t4, t4 = t5 -> t3]
+    : t2 -| [
+        (m2, n2) -> (n2, k2) -> (m2, k2) = (2, 3) -> t4,
+        t4 = t5 -> t3,
+        (m1, n1) -> (n1, k1) -> (m1, k1) = t3 -> t2
+    ]
+    env |- C : (4, 5) -| {}
+: t1 -| [
+    (m2, n2) -> (n2, k2) -> (m2, k2) = (2, 3) -> t4,
+    t4 = t5 -> t3,
+    (m1, n1) -> (n1, k1) -> (m1, k1) = t3 -> t2,
+    t2 = (4, 5) -> t1
+]
+```
+
+Solving constraints:
+
+```
+(m2, n2) -> (n2, k2) -> (m2, k2) = (2, 3) -> t4,
+t4 = t5 -> t3,
+(m1, n1) -> (n1, k1) -> (m1, k1) = t3 -> t2,
+t2 = (4, 5) -> t1
+
+subst m2, n2 = 2, 3
+
+(3, k2) -> (2, k2) = t4,
+t4 = t5 -> t3,
+(m1, n1) -> (n1, k1) -> (m1, k1) = t3 -> t2,
+t2 = (4, 5) -> t1
+
+subst (3, k2) -> (2, k2) = t4
+
+(3, k2) -> (2, k2) = t5 -> t3,
+(m1, n1) -> (n1, k1) -> (m1, k1) = t3 -> t2,
+t2 = (4, 5) -> t1
+
+subst t5 = (3, k2)
+
+(2, k2) = t3,
+(m1, n1) -> (n1, k1) -> (m1, k1) = t3 -> t2,
+t2 = (4, 5) -> t1
+
+subst t3 = (2, k2)
+
+(m1, n1) -> (n1, k1) -> (m1, k1) = (2, k2) -> t2,
+t2 = (4, 5) -> t1
+
+subst m1, n1 = 2, k2
+
+(k2, k1) -> (2, k1) = t2,
+t2 = (4, 5) -> t1
+
+subst (k2, k1) -> (2, k1) = t2
+
+(k2, k1) -> (2, k1) = (4, 5) -> t1
+
+subst (k2, k1) = (4, 5)
+
+(2, 5) = t1
+
+```
+
+we get (2, 5 as expected). We implicitly figured out that B must have been (3, 4).
