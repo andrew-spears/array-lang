@@ -2,6 +2,8 @@ import ArrayLang.Matrices
 open Matrices
 open Std
 
+universe u
+
 /- implementing HM algorithm on an array language -/
 
 /- a parametric type. Either base or arrow between bases.
@@ -29,48 +31,63 @@ namespace arr
   | apply (f : Expr) (inp : Expr)
   | let_in (name : String) (e1 e2 : Expr) -- let [name] = [e1] in [e2]
 
-  inductive BaseType where
-  | arr (m n : Nat) -- type includes the shape now
+
+  abbrev DVar := Nat -- an unknown dimension variable. represented by nats but also literally has value which is a nat
+  inductive Dim where
+  | var : DVar → Dim
+  | const : Nat → Dim
   deriving DecidableEq, BEq, Repr
 
-  def getType (c : Const) : BaseType := -- the canonical mapping of constants to their types
-    match c with
-    | .matrix m n _ => .arr m n
+  inductive BaseType where
+  | arr (m n : Dim) -- type includes the shape
+  deriving DecidableEq, BEq, Repr
 
-section simple_syntax
-  /- Surface syntax, so we can write `[lang| fun x => if x then 1 else 0]`
-  instead of nesting constructors by hand. -/
-  declare_syntax_cat lang
-
-  syntax num : lang
-  syntax "(" num ", " num ")" : lang        -- matrix literal, e.g. (3, 2)
-  syntax ident : lang
-  syntax "(" lang ")" : lang
-  syntax:100 lang:100 lang:101 : lang                 -- application, left assoc
-  syntax:65 lang:65 " + " lang:66 : lang              -- addition, left assoc
-  syntax:10 "fun " ident " => " lang:10 : lang
-  syntax:10 "if " lang " then " lang " else " lang:10 : lang
-  syntax:10 "let " ident " = " lang " in " lang:10 : lang
+  /- a type which can depend on some shape variables
+  e.g. `Dot : forall m n k : Nat, (m, n) -> (n, k) -> (m, k)` -/
+  structure DepType (baseType: Type) where
+    bound : List DVar -- universally quantified dimension vars
+    body : type baseType
+  deriving DecidableEq, BEq, Repr
 
 
-  syntax "[lang| " lang "]" : term
+  -- def getType (c : Const) : BaseType := -- the canonical mapping of constants to their types
+  --   match c with
+  --   | .matrix m n _ => .arr m n
 
-  macro_rules
-  | `([lang| $n:num])            => `(Expr.const (Const.int $n))
-  | `([lang| ($m:num, $n:num)])  => `(Expr.const (Const.matrix $m $n))
-  | `([lang| $x:ident])          =>
-    match x.getId.toString with
-    | "true"  => `(Expr.const (Const.bool true))
-    | "false" => `(Expr.const (Const.bool false))
-    | name    => `(Expr.var $(Lean.quote name))
-  | `([lang| ($e)])              => `([lang| $e])
-  | `([lang| $f $a])             => `(Expr.apply [lang| $f] [lang| $a])
-  | `([lang| $a + $b])           => `(Expr.apply (Expr.apply (Expr.var "+") [lang| $a]) [lang| $b])
-  | `([lang| fun $x => $b])      => `(Expr.lam $(Lean.quote x.getId.toString) [lang| $b])
-  | `([lang| if $c then $t else $e]) => `(Expr.if_else [lang| $c] [lang| $t] [lang| $e])
-  | `([lang| let $x = $e1 in $e2]) => `(Expr.let_in $(Lean.quote x.getId.toString) [lang| $e1] [lang| $e2])
+-- section arr_syntax
+--   /- Surface syntax, so we can write `[lang| fun x => if x then 1 else 0]`
+--   instead of nesting constructors by hand. -/
+--   declare_syntax_cat lang
 
-end simple_syntax
+--   syntax num : lang
+--   syntax "(" num ", " num ")" : lang        -- matrix literal
+--   syntax ident : lang
+--   syntax "(" lang ")" : lang
+--   syntax:100 lang:100 lang:101 : lang                 -- application, left assoc
+--   syntax:65 lang:65 " + " lang:66 : lang              -- addition, left assoc
+--   syntax:10 "fun " ident " => " lang:10 : lang
+--   syntax:10 "if " lang " then " lang " else " lang:10 : lang
+--   syntax:10 "let " ident " = " lang " in " lang:10 : lang
+
+
+--   syntax "[lang| " lang "]" : term
+
+--   macro_rules
+--   | `([lang| $n:num])            => `(Expr.const (Const.int $n))
+--   | `([lang| ($m:num, $n:num)])  => `(Expr.const (Const.matrix $m $n))
+--   | `([lang| $x:ident])          =>
+--     match x.getId.toString with
+--     | "true"  => `(Expr.const (Const.bool true))
+--     | "false" => `(Expr.const (Const.bool false))
+--     | name    => `(Expr.var $(Lean.quote name))
+--   | `([lang| ($e)])              => `([lang| $e])
+--   | `([lang| $f $a])             => `(Expr.apply [lang| $f] [lang| $a])
+--   | `([lang| $a + $b])           => `(Expr.apply (Expr.apply (Expr.var "+") [lang| $a]) [lang| $b])
+--   | `([lang| fun $x => $b])      => `(Expr.lam $(Lean.quote x.getId.toString) [lang| $b])
+--   | `([lang| if $c then $t else $e]) => `(Expr.if_else [lang| $c] [lang| $t] [lang| $e])
+--   | `([lang| let $x = $e1 in $e2]) => `(Expr.let_in $(Lean.quote x.getId.toString) [lang| $e1] [lang| $e2])
+
+-- end arr_syntax
 end arr
 
 open arr
@@ -98,14 +115,19 @@ inductive TypeAtom where -- leaves of an OpenType
 | var : TVar → TypeAtom -- unknown TVar, e.g. 't1
 deriving DecidableEq, BEq, Repr
 
-abbrev OpenType  := type TypeAtom   -- may contain TVars; what inference works with
-abbrev GroundType := type BaseType     -- no variables; a finished, concrete type
+abbrev OpenType  := type TypeAtom   -- may contain TVars; purely for inference
+abbrev DepOpenType  := DepType TypeAtom   -- OpenType with universally quantified shape vars
+abbrev GroundType := DepType BaseType  -- no type variables
+instance : Coe OpenType DepOpenType := ⟨fun t => { bound := [], body := t }⟩
 
 def type.tvars (t : OpenType) : List TVar :=
   match t with
   | .base (.var x) => [x]
   | .arrow t1 t2 => (t1.tvars ++ t2.tvars).eraseDups
   | _ => []
+def DepType.tvars (t : DepOpenType) : List TVar :=
+  t.body.tvars
+
 
 /- universally quantified type, e.g. ∀ 'a, 'a -> 'a.
 This is fundamentally different than free type variables, e.g. ?0 -> ?0.
@@ -115,41 +137,65 @@ The second is not actually polymorphic - ?0 -> ?0 means the identity function fo
 `let f = fun x -> x in (f 0, f true)`       -- accepted -/
 structure TypeScheme where
   bound : List TVar
-  body : OpenType
-instance : Coe OpenType TypeScheme := ⟨fun t => { bound := [], body := t }⟩
+  body : DepOpenType
+instance : Coe DepOpenType TypeScheme := ⟨fun t => { bound := [], body := t }⟩
 -- TVars present in the body but not quantified
 def TypeScheme.free (σ : TypeScheme) : List TVar :=
-  σ.body.tvars.removeAll σ.bound
+  σ.body.body.tvars.removeAll σ.bound
 
 section open_type_syntax
   /- Surface syntax for type expressions, so we can write `[ty| nat -> '0]`
   instead of nesting constructors. `->` is right assoc, as usual. -/
+
+  declare_syntax_cat dim
+
+  syntax "#" num : dim -- variable dimension
+  syntax num : dim -- known dimension
+
   declare_syntax_cat ty
 
-  syntax "(" num ", " num ")" : ty                -- matrix of shape m, n
+  syntax "(" dim ", " dim ")" : ty                -- matrix of shape m, n
   syntax "?" num : ty                             -- type variable, e.g. ?0
   syntax "?" "(" term ")" : ty                    -- type variable from a runtime Nat, e.g. ?(t')
   syntax "~" "(" term ")" : ty                    -- splice in a whole OpenType, e.g. ~(t1)
   syntax "(" ty ")" : ty
   syntax:25 ty:26 " -> " ty:25 : ty               -- arrow, right assoc
-
+  syntax "dims " (("#" num)+) ", " ty : ty        -- universal quantification over dims
   syntax "[ty| " ty "]" : term
 
+  def expandDim : Lean.TSyntax `dim → Lean.MacroM (Lean.TSyntax `term)
+    | `(dim | # $n:num) => `(Dim.var $n)
+    | `(dim | $n:num) => `(Dim.const $n)
+    | _ => Lean.Macro.throwUnsupported
+
   macro_rules
-  | `([ty| ($m:num, $n:num)])       => `(type.base (TypeAtom.const (BaseType.arr $m $n)))
+  | `([ty| ($m:dim, $n:dim)])   => do
+      let m ← expandDim m
+      let n ← expandDim n
+      `(type.base (TypeAtom.const (BaseType.arr $m $n)))
   | `([ty| ?$n:num])    => `(type.base (TypeAtom.var $n))
   | `([ty| ?($t:term)]) => `(type.base (TypeAtom.var $t))
   | `([ty| ~($t:term)]) => `($t)
   | `([ty| ($t)])       => `([ty| $t])
   | `([ty| $a -> $b])   => `(type.arrow [ty| $a] [ty| $b])
+  | `([ty| dims $[#$ns:num]*, $t])   => `({ bound := [$[$ns],*], body := [ty|$t] : DepOpenType})
 
+
+  #check [ty| dims #0 #1 #2, (#0, #1) -> (#1, #2) -> (#0, #2)] -- matrix product
+  #check [ty| dims #0, (4, #0)]
   #check [ty| (2, 3)]
-  #check [ty| ?0 -> ?1 -> ?0]                     -- right assoc: ?0 -> (?1 -> ?0)
-  #check [ty| ((2, 3) -> (1, 1)) -> ?2]
+  #check [ty| ?0 -> ?1 -> ?0]
+  #check [ty| dims #0, ((#0, 3) -> (#0, 1)) -> ?2]
 
   /- Print types back in the `[ty| ...]` surface syntax rather than as raw
   constructors, so `#eval` output is readable. Parenthesise the left side of an
   arrow only, since `->` is right assoc. -/
+  instance (n: Nat) : OfNat Dim n where
+    ofNat := Dim.const n
+  instance : ToString Dim where
+    toString := λ d : Dim => match d with
+    | .var n => "#" ++ (toString n)
+    | .const n => toString n
   instance : ToString BaseType where
     toString
       | BaseType.arr m n => s!"({m}, {n})"
@@ -166,13 +212,21 @@ section open_type_syntax
         | .arrow _ _ => s!"({type.toString a})"   -- left side needs parens
         | _ => type.toString a
       s!"{l} -> {type.toString b}"
-
   instance [ToString α] : ToString (type α) := ⟨type.toString⟩
   instance [ToString α] : Repr (type α) := ⟨fun t _ => type.toString t⟩
 
-  #eval [ty| (2, 3) -> (3, 4)]
+  def DepType.toString [ToString α] (t : DepType α) : String :=
+    match t.bound with
+    | [] => ToString.toString t.body
+    | bs => "dims " ++ String.intercalate " " (bs.map (s!"#{·}")) ++ ", " ++ ToString.toString t.body
+  instance [ToString α] : ToString (DepType α) := ⟨DepType.toString⟩
+  instance [ToString α] : Repr (DepType α) := ⟨fun t _ => DepType.toString t⟩
+
+  #eval [ty| dims #0 #1 #2, (#0, #1) -> (#1, #2) -> (#0, #2)] -- matrix product
+  #eval [ty| dims #0, (4, #0)]
+  #eval [ty| (2, 3)]
   #eval [ty| ?0 -> ?1 -> ?0]
-  #eval [ty| ((1, 1) -> (1, 2)) -> ?2]
+  #eval [ty| dims #0, ((#0, 3) -> (#0, 1)) -> ?2]
 
     /- Surface syntax for type schemes: `[sch| forall ?0 ?1, ?0 -> ?1]`, or
   `[sch| nat -> bool]` for a monomorphic one (empty binder list). -/
@@ -197,6 +251,7 @@ section open_type_syntax
   #eval [sch| forall ?0 ?1, ?0 -> ?1 -> ?0]     -- fun x y => x
   #eval [sch| (2, 2) -> ?3]                       -- monomorphic, bound = []
   #eval [sch| forall ?0, (4, 4)]                   -- representable but generalize won't build it
+  #eval [sch| forall ?0, dims #0, (4, 4) -> (#0, #0) -> ?0]
 
 end open_type_syntax
 
@@ -230,7 +285,10 @@ def Env.free (Γ : Env) :=
   (Γ.domain.filterMap Γ.lookup).flatMap TypeScheme.free |>.eraseDups
 
 -- initial environment with types of built-ins
-abbrev initialEnv := Env.ofList [("+", [sch| (2, 2) -> (2, 2) -> (2, 2)])] -- for now. Should really be forall m n, (m, n) -> (m, n) -> (m, n)
+abbrev initialEnv := Env.ofList [
+  ("*", [sch| dims #0 #1 #2, (#0, #1) -> (#1, #2) -> (#0, #2)]),
+  ("+", [sch| dims #0 #1, (#0, #1) -> (#0, #1) -> (#0, #1)])
+]
 abbrev Env.extendInitial (Γ : Env) := initialEnv.union Γ
 
 /- substitution {subst / var}, e.g. {int → int / 't}. -/
@@ -371,16 +429,11 @@ def infer (e : Expr) (Γ : Env := initialEnv) : Error OpenType := do
 section testing
   /- end to end tests -/
 
-  -- def test_env := Env.extendInitial <| Env.ofList [
-  --   ("x", [ty| (2, 2)]),
-  --   ("y", [ty| (2, 2)]),
-  --   ("f", [ty| (2, 2) -> (2, 2)]),
-  --   ("g", [ty| (2, 2) -> (2, 2)]),
-  --   ("h", [ty| (2, 2) -> (2, 2) -> (2, 2)]),
-  --   ("nb", [ty| (2, 2) -> bool]),
-  --   ("bn", [ty| bool -> (2, 2)]),
-  --   ("bb", [ty| bool -> bool])
-  -- ]
+  def test_env := Env.extendInitial <| Env.ofList [
+    ("x", [ty| (2, 2)]),
+    ("y", [ty| (2, 2)]),
+
+  ]
 
   -- macro "#test " e:term " : " t:term : command => `(
   --   #eval (do
