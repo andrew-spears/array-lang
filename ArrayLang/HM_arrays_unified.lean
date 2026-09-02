@@ -31,13 +31,18 @@ namespace arr
   | apply (f : Expr) (inp : Expr)
   | let_in (name : String) (e1 e2 : Expr) -- let [name] = [e1] in [e2]
 
-  inductive BaseType (dimType : Type) where
-  | arr (m n : dimType) -- type includes the shape
+  inductive Dim where
+  | const : Nat → Dim
+  | var : Nat → Dim -- variable dimension. Nat is just an index
   deriving DecidableEq, BEq, Repr
 
-  def getType (c : Const) : BaseType Nat := -- the canonical mapping of constants to their types
+  inductive BaseType where
+  | arr (m n : Dim) -- type includes the shape
+  deriving DecidableEq, BEq, Repr
+
+  def getType (c : Const) : BaseType := -- the canonical mapping of constants to their types
     match c with
-    | .matrix m n _ => .arr m n
+    | .matrix m n _ => .arr (Dim.const m) (Dim.const n)
 
 section arr_syntax
   /- Surface syntax, so we can write `[lang| fun x => if x then 1 else 0]`
@@ -109,18 +114,12 @@ instance : ToString TDVar where
 
 abbrev InferM := StateT (Nat × Nat) Error -- Monad to thread the next fresh type var and dimension var, along with failures.
 
-inductive Dim where
-| const : Nat → Dim
-| var : Nat → Dim -- variable dimension. Nat is just an index
+inductive TypeAtom where -- leaves of an OpenType
+| const : BaseType → TypeAtom -- known type, with variable dimensions -- TODO should this be DimBase +?
+| var : Nat → TypeAtom -- unknown TVar, e.g. 't1
 deriving DecidableEq, BEq, Repr
 
-inductive TypeAtom (baseType : Type) where -- leaves of an OpenType
-| const : baseType → TypeAtom baseType -- known type, with variable dimensions -- TODO should this be DimBase + BaseType?
-| var : Nat → TypeAtom baseType -- unknown TVar, e.g. 't1
-deriving DecidableEq, BEq, Repr
-
-abbrev OpenType {dimType} := type (TypeAtom (BaseType dimType))   -- may contain TVars; not a 'real' type in the language
--- abbrev OpenType {dimType} := type (TypeAtom (BaseType dimType))   -- may contain TVars; not a 'real' type in the language
+abbrev OpenType := type TypeAtom -- may contain TVars; not a 'real' type in the language
 
 -- def type.tvars (t : OpenType) : List Nat :=
 --   match t with
@@ -174,7 +173,7 @@ section open_type_syntax
   | `([ty| ($m:dim, $n:dim)])   => do
       let m ← expandDim m
       let n ← expandDim n
-      `(type.base (TypeAtom.const (DimBase.arr $m $n)))
+      `(type.base (TypeAtom.const (BaseType.arr $m $n)))
   | `([ty| ?$n:num])    => `(type.base (TypeAtom.var $n))
   | `([ty| ?($t:term)]) => `(type.base (TypeAtom.var $t))
   | `([ty| ~($t:term)]) => `($t)
@@ -200,9 +199,9 @@ section open_type_syntax
   --   toString
   --     | BaseType.arr m n => s!"({m}, {n})"
 
-  instance : ToString DimBase where
+  instance : ToString BaseType where
     toString
-      | DimBase.arr m n => s!"({m}, {n})"
+      | BaseType.arr m n => s!"({m}, {n})"
 
   instance : ToString TypeAtom where
     toString
