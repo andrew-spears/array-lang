@@ -8,6 +8,8 @@ def sum (n : Nat) (f : Fin n → T) : T := Fin.foldr n (fun i acc => f i + acc) 
  to an element type. Matrices take two indices -/
 def Matrix (m n : Nat) : Type := Fin m → Fin n → T
 
+def identity (n : Nat) : Matrix Int n n := λ i j => if i = j then 1 else 0
+
 /- Products -/
 -- notation to allow writing A ⬝ B for all products, overloaded on types
 class Dot (α : Type) (β : Type) (γ : outParam Type) where
