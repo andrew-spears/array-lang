@@ -378,7 +378,7 @@ def generalize (C : List Constraint) (Γ : Env) (name : Var) (t : OpenType) : Er
 -- Γ |- e : t -| C, return t, C
 def buildConstraints (e : arr.Expr) (Γ : Env) : InferM (OpenType × List Constraint) :=
   match e with
-  | .const c => do return (type.base (TypeAtom.const (arr.getType c))), [])
+  | .const c => do return (type.base (TypeAtom.const (arr.getType c)), [])
   | .var x => match Γ.lookup x with
     | some σ => do
       let t ← instantiate σ
