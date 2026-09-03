@@ -262,11 +262,11 @@ def freshD : InferM Nat := do -- get a fresh unused dimension variable
   let (n, m) ← get
   set (n, m + 1)
   return m
--- def occurs (v : TVar) (e : OpenType) : Bool :=
---   match e with
---   | .base (.var x) => x = v
---   | .arrow t1 t2 => (occurs v t1) ∨ (occurs v t2)
---   | _ => false
+def occurs (v : Nat) (e : OpenType) : Bool :=
+  match e with
+  | .base (.var x) => x = v
+  | .arrow t1 t2 => (occurs v t1) ∨ (occurs v t2)
+  | _ => false
 
 -- environment = a mapping from variables to their types (implicitly TypeSchemes)
 structure Env where
@@ -294,11 +294,11 @@ abbrev initialEnv := Env.ofList [
 abbrev Env.extendInitial (Γ : Env) := initialEnv.union Γ
 
 
-
 -- substitution {subst / var}, e.g. {int → int / 't}.
 structure Subst where
   tys : List (Nat × OpenType) -- apply right to left
   dims : List (Nat × Dim)
+deriving Nonempty
 def Subst.singletonT (v : Nat) (t : OpenType) : Subst := Subst.mk [(v, t)] []
 def Subst.singletonD (v : Nat) (d : Dim) : Subst := Subst.mk [] [(v, d)]
 def Subst.empty : Subst := Subst.mk [] []
@@ -321,32 +321,28 @@ def Subst.compose (S1 S2 : Subst) : Subst :=  -- apply S2 then S1
 def Subst.restrict (S : Subst) (bound : Vars) : Subst := -- drop these vars
   { tys := S.tys.filter (λ (x, _) => !bound.tys.contains x),
     dims := S.dims.filter (λ (x, _) => !bound.dims.contains x)}
+def TypeScheme.subst (σ : TypeScheme) (S : Subst) : TypeScheme :=
+  { σ with body := σ.body.subst (S.restrict σ.bound) } --Subst should never overwrite a bound variable (generalize should prevent this too)
+def Env.subst (Γ : Env) (S : Subst) : Env :=
+  { Γ with lookup := λ name => (Γ.lookup name).map (·.subst S) }
 
 #eval (Dim.const 3).subst (Subst.singletonD 3 8) -- should leave alone
 #eval (Dim.var 3).subst (Subst.singletonD 3 8) -- should substitute
 #eval (Dim.var 3).subst (Subst.singletonT 3 [ty| (2, 3)]) -- should leave alone
 
-/- Subst should never overwrite a bound variable (generalize should prevent this too) -/
-def TypeScheme.subst (σ : TypeScheme) (S : Subst) : TypeScheme :=
-  { σ with body := σ.body.subst (S.restrict σ.bound) }
-
-def Env.subst (Γ : Env) (S : Subst) : Env :=
-  { Γ with lookup := λ name => (Γ.lookup name).map (·.subst S) }
-
-
+/- Constraint of equality between two types -/
 abbrev Constraint := OpenType × OpenType
-def Constraint.subst (c : Constraint) (s : AtomicSubst) : Constraint :=
-  (c.1.subst s, c.2.subst s)
-def substConstraints (C : List Constraint) (s : AtomicSubst) : List Constraint :=
-  C.map (·.subst s)
+def Constraint.subst (c : Constraint) (S : Subst) : Constraint :=
+  (c.1.subst S, c.2.subst S)
+def substConstraints (C : List Constraint) (S : Subst) : List Constraint :=
+  C.map (·.subst S)
 
+
+/- unification: generating a substitution that solves constraints -/
 def unifyDims (m1 m2 : Dim) : Error Subst :=
   match m1, m2 with
-  | .const m1, .const m2 => if m1 = m2 then .ok Subst.empty else throw ErrorT.fail
-  | .var m1, .const m2 => .ok (Subst.singleton (TDVar.DVar m1) (Dim.const m2))
-  | .const m1, .var m2 => .ok (Subst.singleton (TDVar.DVar m2) (Dim.const m1))
-  | .var m1, .var m2 => .ok (Subst.singleton (TDVar.DVar m1) (Dim.var m2))
-
+  | .var x, d | d, .var x => .ok (Subst.singletonD x d)
+  | .const x, .const y => if x = y then .ok (Subst.empty) else throw ErrorT.fail
 def unifyShapes (a b : BaseType) : Error Subst :=
   match a, b with
   | .arr m1 n1, .arr m2 n2 => do
@@ -359,18 +355,19 @@ partial def unify (C: List Constraint) : Error Subst :=
   match C with
   | [] => do return Subst.empty
   | (t1, t2) :: C' =>
-    let bindVar (x : TDVar) (t : OpenType) (C' : List Constraint): Error Subst :=
+    let bindVar (x : Nat) (t : OpenType) (C' : List Constraint): Error Subst :=
       if occurs x t then throw ErrorT.fail else do
-        let S := AtomicSubst.mk x t
+        let S := Subst.singletonT x t
         let S' ← unify (substConstraints C' S)
-        return S'.compose S
+        return Subst.compose S' S
     match t1, t2 with
     -- identical variables / identical constants: nothing to learn
     | .base (.var x), .base (.var y) =>
       if x = y then unify C' else bindVar x t2 C'
-    | .base (.const a), .base (.const b) =>
-
-      if a = b then unify C' else throw ErrorT.fail
+    | .base (.const a), .base (.const b) => do
+      let S ← unifyShapes a b
+      let S' ← unify (substConstraints C' S)
+      return Subst.compose S' S
     -- a variable = anything else
     | .base (.var x), t | t, .base (.var x) => bindVar x t C'
     -- reduce
