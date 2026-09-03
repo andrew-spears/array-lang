@@ -24,7 +24,7 @@ abbrev OpenType2 {D : Type} := Ty (VarBase (ConstBase D))
 
 #check (Ty.base (VarBase.var) : OpenType2 )
 #check (Ty.base (VarBase.const (ConstBase.arr 2 3)) : OpenType2)
-#check (.inr (Ty.base (VarBase.const (ConstBase.arr (VarDim.const 2) (VarDim.var)))) : OpenType2)
+#check (Ty.base (VarBase.const (ConstBase.arr (VarDim.const 2) (VarDim.var))) : OpenType2)
 
 
 

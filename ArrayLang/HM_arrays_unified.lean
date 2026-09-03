@@ -14,7 +14,7 @@ inductive type (baseType : Type) where
 | arrow : type baseType → type baseType → type baseType
 deriving DecidableEq, BEq, Repr
 
-namespace arr
+section arr
   /- A language with array objects. types specify array shapes
   only allow 2d matrices over integers
   -/
@@ -88,7 +88,7 @@ section arr_syntax
 end arr_syntax
 end arr
 
-open arr
+
 
 /- HM Algorithm -/
 section hindley_milner
@@ -103,14 +103,6 @@ instance [BEq ε] [BEq α] : BEq (Except ε α) where
     | .ok a, .ok b => a == b
     | .error a, .error b => a == b
     | _, _ => false
-
-inductive TDVar where
-| TVar : Nat → TDVar -- a type variable (can be arrow type). Nat is just an index
-| DVar : Nat → TDVar -- a dimension variable. Nat is just an index
-instance : ToString TDVar where
-  toString := λ t => match t with
-  | .TVar t => s!"?{t}"
-  | .DVar t => s!"#{t}"
 
 abbrev InferM := StateT (Nat × Nat) Error -- Monad to thread the next fresh type var and dimension var, along with failures.
 
@@ -127,6 +119,16 @@ abbrev OpenType := type TypeAtom -- may contain TVars; not a 'real' type in the 
 --   | .arrow t1 t2 => (t1.tvars ++ t2.tvars).eraseDups
 --   | _ => []
 
+structure Vars where
+  tys : List Nat
+  dims : List Nat
+deriving Repr, BEq
+def Vars.empty : Vars := ⟨[], []⟩
+def Vars.union (a b : Vars) : Vars :=
+  ⟨(a.tys ++ b.tys).eraseDups, (a.dims ++ b.dims).eraseDups⟩
+def Vars.removeAll (a b : Vars) : Vars :=
+  ⟨a.tys.removeAll b.tys, a.dims.removeAll b.dims⟩
+
 /- universally quantified type, e.g. ∀ 'a, 'a -> 'a.
 This is fundamentally different than free type variables, e.g. ?0 -> ?0.
 The first only appears in inference, and isn't truly a valid type of an expression.
@@ -134,11 +136,11 @@ The second is not actually polymorphic - ?0 -> ?0 means the identity function fo
 `(fun f -> (f 0, f true)) (fun x -> x)`     -- rejected by HM
 `let f = fun x -> x in (f 0, f true)`       -- accepted -/
 structure TypeScheme where
-  bound : List TDVar
+  bound : Vars
   body : OpenType
-instance : Coe OpenType TypeScheme := ⟨fun t => { bound := [], body := t }⟩
--- Vars present in the body but not quantified
+instance : Coe OpenType TypeScheme := ⟨fun t => { bound := Vars.empty, body := t }⟩
 
+-- Vars present in the body but not quantified
 -- def TypeScheme.free (σ : TypeScheme) : List TVar :=
 --   σ.body.tvars.removeAll (σ.bound.filterMap λ t =>
 --     match t with
@@ -231,15 +233,15 @@ section open_type_syntax
 
   macro_rules
   | `([sch| forall $[?$ns:num]* $[#$ms:num]*, $t]) =>
-      `({ bound := [$[$ns],*].map (TDVar.TVar ·) ++ [$[$ms],*].map (TDVar.DVar ·) , body := [ty| $t] : TypeScheme })
-  | `([sch| $t:ty])                   => `({ bound := [], body := [ty| $t] : TypeScheme })
+      `({ bound := ⟨[$[$ns],*], [$[$ms],*]⟩, body := [ty| $t] : TypeScheme })
+  | `([sch| $t:ty])                   => `({ bound := Vars.empty, body := [ty| $t] : TypeScheme })
 
   /- Print schemes back in that syntax. Monomorphic schemes print as bare types,
   matching how OCaml hides the quantifier. -/
   def TypeScheme.toString (σ : TypeScheme) : String :=
   match σ.bound with
-  | [] => ToString.toString σ.body
-  | ts => "forall " ++ String.intercalate " " (ts.map ToString.toString) ++ ", " ++ ToString.toString σ.body
+  | ⟨[], []⟩ => ToString.toString σ.body
+  | ⟨ts, ds⟩ => "forall " ++ String.intercalate " " (ts.map (s!"?{·}")) ++ String.intercalate " " (ds.map (s!"#{·}"))  ++ ", " ++ ToString.toString σ.body
 
   instance : ToString TypeScheme := ⟨TypeScheme.toString⟩
   instance : Repr TypeScheme := ⟨fun σ _ => TypeScheme.toString σ⟩
@@ -268,13 +270,13 @@ def freshD : InferM Nat := do -- get a fresh unused dimension variable
 
 -- environment = a mapping from variables to their types (implicitly TypeSchemes)
 structure Env where
-  lookup : arr.Var → Option TypeScheme
-  domain : List arr.Var
+  lookup : Var → Option TypeScheme
+  domain : List Var
 abbrev Env.empty : Env := { lookup := λ _ => none, domain := [] }
-abbrev Env.update (name : arr.Var) (t : TypeScheme) : Env → Env :=
+abbrev Env.update (name : Var) (t : TypeScheme) : Env → Env :=
   λ Γ => { lookup:= λ x => if x=name then some t else Γ.lookup x,
             domain := name :: Γ.domain }
-abbrev Env.ofList (L : List (arr.Var × TypeScheme)) : Env :=
+abbrev Env.ofList (L : List (Var × TypeScheme)) : Env :=
   L.foldl (λ Γ (name, t) => Γ.update name t) Env.empty
 abbrev Env.union (Γ Γ' : Env) : Env := -- preference to right arg
   { lookup:= λ name => if Γ'.lookup name = none then Γ.lookup name else Γ'.lookup name,
@@ -291,54 +293,75 @@ abbrev initialEnv := Env.ofList [
 ]
 abbrev Env.extendInitial (Γ : Env) := initialEnv.union Γ
 
-/- substitution {subst / var}, e.g. {int → int / 't}. -/
-abbrev Subst := TDVar → Option OpenType -- TODO: should this have constraints on separating dims and types?
-abbrev Subst.empty : Subst := λ _ => none
--- abbrev Subst.singleton (x : TDVar) (t : OpenType): Subst :=
---   λ y => match x, y with
---   | .TVar n, .TVar m => if n=m then some t else none
---   | .DVar n => if x=y then some t else none
 
+
+-- substitution {subst / var}, e.g. {int → int / 't}.
+structure Subst where
+  tys : List (Nat × OpenType) -- apply right to left
+  dims : List (Nat × Dim)
+def Subst.singletonT (v : Nat) (t : OpenType) : Subst := Subst.mk [(v, t)] []
+def Subst.singletonD (v : Nat) (d : Dim) : Subst := Subst.mk [] [(v, d)]
+def Subst.empty : Subst := Subst.mk [] []
+def Dim.subst (d : Dim) (S : Subst) : Dim :=
+  match d with
+  | .const _ => d
+  | .var x => match S.dims.lookup x with
+    | some d' => d'
+    | none => d
 def type.subst (t : OpenType) (S : Subst) : OpenType :=
   match t with
-  | .base (.var x) => match S x with
-    | some t' => t' -- substitute
-    | none => t -- leave alone
+  | .base (.var x) => match S.tys.lookup x with
+    | some t' => t'
+    | none => t
+  | .base (.const (.arr m n)) => .base (.const (.arr (m.subst S) (n.subst S))) -- dim subst
   | .arrow t1 t2 => type.arrow (t1.subst S) (t2.subst S)
-  | _ => t
+def Subst.compose (S1 S2 : Subst) : Subst :=  -- apply S2 then S1
+  { tys := S1.tys.map (λ (x, t) => (x, t.subst S2)) ++ S2.tys,  -- apply S2 into S1, so the composition is idempotent
+    dims := S1.dims.map (λ (x, d) => (x, d.subst S2)) ++ S2.dims}
+def Subst.restrict (S : Subst) (bound : Vars) : Subst := -- drop these vars
+  { tys := S.tys.filter (λ (x, _) => !bound.tys.contains x),
+    dims := S.dims.filter (λ (x, _) => !bound.dims.contains x)}
 
-abbrev Subst.compose (S S' : Subst) : Subst := -- apply right to left
-  λ x => match S' x with
-  | none => S x
-  | some t => t.subst S
-abbrev Subst.update (S : Subst) (x : TVar) (t : OpenType) : Subst := -- compose by adding to the left
-  (Subst.singleton x t).compose S
-abbrev Subst.sequential (L : List (TVar × OpenType)) : Subst :=
-  L.foldr (λ (x, t) S => S.update x t) Subst.empty -- TODO: this is backwards from convention?
-abbrev Subst.parallel (L : List (TVar × OpenType)) : Subst :=
-  λ x => L.lookup x
+#eval (Dim.const 3).subst (Subst.singletonD 3 8) -- should leave alone
+#eval (Dim.var 3).subst (Subst.singletonD 3 8) -- should substitute
+#eval (Dim.var 3).subst (Subst.singletonT 3 [ty| (2, 3)]) -- should leave alone
 
 /- Subst should never overwrite a bound variable (generalize should prevent this too) -/
 def TypeScheme.subst (σ : TypeScheme) (S : Subst) : TypeScheme :=
-  { σ with body := σ.body.subst (λ x => if σ.bound.contains x then none else S x) }
+  { σ with body := σ.body.subst (S.restrict σ.bound) }
+
 def Env.subst (Γ : Env) (S : Subst) : Env :=
-  { lookup := λ name => (Γ.lookup name).map (·.subst S),
-    domain := Γ.domain }
+  { Γ with lookup := λ name => (Γ.lookup name).map (·.subst S) }
+
 
 abbrev Constraint := OpenType × OpenType
-def Constraint.subst (c : Constraint) (S : Subst) : Constraint :=
-  (c.1.subst S, c.2.subst S)
-def substConstraints (C : List Constraint) (S : Subst) : List Constraint :=
-  C.map (·.subst S)
+def Constraint.subst (c : Constraint) (s : AtomicSubst) : Constraint :=
+  (c.1.subst s, c.2.subst s)
+def substConstraints (C : List Constraint) (s : AtomicSubst) : List Constraint :=
+  C.map (·.subst s)
+
+def unifyDims (m1 m2 : Dim) : Error Subst :=
+  match m1, m2 with
+  | .const m1, .const m2 => if m1 = m2 then .ok Subst.empty else throw ErrorT.fail
+  | .var m1, .const m2 => .ok (Subst.singleton (TDVar.DVar m1) (Dim.const m2))
+  | .const m1, .var m2 => .ok (Subst.singleton (TDVar.DVar m2) (Dim.const m1))
+  | .var m1, .var m2 => .ok (Subst.singleton (TDVar.DVar m1) (Dim.var m2))
+
+def unifyShapes (a b : BaseType) : Error Subst :=
+  match a, b with
+  | .arr m1 n1, .arr m2 n2 => do
+    let S1 ← unifyDims m1 m2
+    let S2 ← unifyDims n1 n2
+    return Subst.compose S1 S2
 
 -- return (the most general) substitution that unifies all constraints
 partial def unify (C: List Constraint) : Error Subst :=
   match C with
   | [] => do return Subst.empty
   | (t1, t2) :: C' =>
-    let bindVar (x : TVar) (t : OpenType) (C' : List Constraint): Error Subst :=
+    let bindVar (x : TDVar) (t : OpenType) (C' : List Constraint): Error Subst :=
       if occurs x t then throw ErrorT.fail else do
-        let S := Subst.singleton x t
+        let S := AtomicSubst.mk x t
         let S' ← unify (substConstraints C' S)
         return S'.compose S
     match t1, t2 with
@@ -346,6 +369,7 @@ partial def unify (C: List Constraint) : Error Subst :=
     | .base (.var x), .base (.var y) =>
       if x = y then unify C' else bindVar x t2 C'
     | .base (.const a), .base (.const b) =>
+
       if a = b then unify C' else throw ErrorT.fail
     -- a variable = anything else
     | .base (.var x), t | t, .base (.var x) => bindVar x t C'

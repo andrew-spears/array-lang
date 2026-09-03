@@ -370,3 +370,113 @@ subst (k2, k1) = (4, 5)
 ```
 
 we get (2, 5 as expected). We implicitly figured out that B must have been (3, 4).
+
+So the types in our language are now dependent with universally quantified variables. For now, we fix those variables to be only dimensions/shapes, i.e. Nats.
+
+so a type may look like
+
+`Dot : forall m n k, (m, n) -> (n, k) -> (m, k)`
+
+where m n k are implicitly nats. or
+
+`forall {}, (2, 5)`
+
+Then during inference, we may still need polymorphism from let \_ in. Say we are inferring
+
+`let id = fun x => x in id`
+
+the type of id during inference would be
+
+`forall 't, forall m n, (m, n) -> (m, n)`
+
+of course the 't doesnt really matter here unless our matrices had carrier types. If a matrix could contain ints or bools and we represented types as `(rows, cols) carrier`, then we might see
+
+`forall 't, forall m n, (m, n) 't -> (m, n) 't`
+
+## Refined approach
+
+Every type scheme is `forall [tvars] [dvars], t`, and the variable types and variable dimensions are treated exactly the same. We rely on construction to put them in their proper places, e.g. dimensions are always in shapes like (m, n) and types never appear in shapes.
+
+example:
+env = {dot : forall m n k, (m, n) -> (n, k) -> (m, k)
++: forall m n, (m, n) -> (m, n) -> (m, n)
+I: (2, 2)}
+env is implicit before all |-
+e = let f = fun x => x + I in f
+
+|- let f = fun x => x + I in f
+|- fun x => x + I
+fresh t1
+{x : t1} |- (+ (+ x)) I
+fresh t2
+{x : t1} |- (+ (+ x))
+fresh t3
+{x : t1} |- + : (m1, n1) -> (m1, n1) -> (m1, n1) -- instantiate DVars
+{x : t1} |- (+ x)
+fresh t4
+{x : t1} |- + : (m2, n2) -> (m2, n2) -> (m2, n2) -- instantiate DVars
+{x : t1} |- x : t1
+: t4 -| {(m2, n2) -> (m2, n2) -> (m2, n2) = t1 -> t4}
+: t3 -| {(m1, n1) -> (m1, n1) -> (m1, n1) = t4 -> t3, (m2, n2) -> (m2, n2) -> (m2, n2) = t1 -> t4}
+{x : t1} |- I : (2, 2)
+: t2 -| {t3 = (2, 2) -> t2, (m1, n1) -> (m1, n1) -> (m1, n1) = t4 -> t3, (m2, n2) -> (m2, n2) -> (m2, n2) = t1 -> t4}
+: t1 -> t2 -| {t3 = (2, 2) -> t2, (m1, n1) -> (m1, n1) -> (m1, n1) = t4 -> t3, (m2, n2) -> (m2, n2) -> (m2, n2) = t1 -> t4}
+generalize
+unify {t3 = (2, 2) -> t2, (m1, n1) -> (m1, n1) -> (m1, n1) = t4 -> t3, (m2, n2) -> (m2, n2) -> (m2, n2) = t1 -> t4}
+subst (2, 2) -> t2 / t3
+{(m1, n1) -> (m1, n1) -> (m1, n1) = t4 -> (2, 2) -> t2, (m2, n2) -> (m2, n2) -> (m2, n2) = t1 -> t4}
+{(m1, n1) -> (m1, n1) = t4 -> (2, 2), (m1, n1) = t2, (m2, n2) -> (m2, n2) -> (m2, n2) = t1 -> t4}
+{(m1, n1) = t4, (m1, n1) = (2, 2), (m1, n1) = t2, (m2, n2) -> (m2, n2) -> (m2, n2) = t1 -> t4}
+subst (m1, n1) / t4
+{(m1, n1) = (2, 2), (m1, n1) = t2, (m2, n2) -> (m2, n2) -> (m2, n2) = t1 -> (m1, n1)}
+{m1 = 2, n1 = 2, (m1, n1) = t2, (m2, n2) -> (m2, n2) -> (m2, n2) = t1 -> (m1, n1)}
+subst 2 / m1
+{n1 = 2, (2, n1) = t2, (m2, n2) -> (m2, n2) -> (m2, n2) = t1 -> (2, n1)}
+subst 2 / n1
+{(2, 2) = t2, (m2, n2) -> (m2, n2) -> (m2, n2) = t1 -> (2, 2)}
+subst (2, 2) / t2
+{(m2, n2) -> (m2, n2) -> (m2, n2) = t1 -> (2, 2)}
+{(m2, n2) -> (m2, n2) = t1, (m2, n2) =(2, 2)}
+subst (m2, n2) -> (m2, n2) / t1
+{(m2, n2) =(2, 2)}
+{m2 = 2, n2 = 2}
+subst 2 / m2
+{n2 = 2}
+subst 2 / n2
+-- back subst:
+(2, 2) -> t2 / t3; (m1, n1) / t4; 2 / m1; 2 / n1; (2, 2) / t2; (m2, n2) -> (m2, n2) / t1; 2 / m2; 2 / n2
+(2, 2) -> (2, 2) / t3; (2, 2) / t4; 2 / m1; 2 / n1; (2, 2) / t2; (2, 2) -> (2, 2) / t1; 2 / m2; 2 / n2
+so t1 = (2, 2) -> (2, 2) -- so the new env is {f : (2, 2) -> (2, 2)}
+{f : (2, 2) -> (2, 2)} |- f : (2, 2) -> (2, 2)
+so we get (2, 2) -> (2, 2), as expected
+
+This means our substitutions need to be qualitatively different for types vs dims.
+types get substituted for OpenTypes, but dims get substituted for either nats or other dims. Otherwise they behave the same way
+
+slightly different example:
+env = {dot : forall m n k, (m, n) -> (n, k) -> (m, k)
++: forall m n, (m, n) -> (m, n) -> (m, n)
+I: forall m, (m, m)}
+env is implicit before all |-
+e = let f = fun x => x + I in f
+
+|- let f = fun x => x + I in f
+|- fun x => x + I
+fresh t1
+{x : t1} |- (+ (+ x)) I
+fresh t2
+{x : t1} |- (+ (+ x))
+fresh t3
+{x : t1} |- + : (m1, n1) -> (m1, n1) -> (m1, n1) -- instantiate
+{x : t1} |- (+ x)
+fresh t4
+{x : t1} |- + : (m2, n2) -> (m2, n2) -> (m2, n2) -- instantiate
+{x : t1} |- x : t1
+: t4 -| {(m2, n2) -> (m2, n2) -> (m2, n2) = t1 -> t4}
+: t3 -| {(m1, n1) -> (m1, n1) -> (m1, n1) = t4 -> t3, (m2, n2) -> (m2, n2) -> (m2, n2) = t1 -> t4}
+{x : t1} |- I : (m3, m3)
+: t2 -| {t3 = (m3, m3) -> t2, (m1, n1) -> (m1, n1) -> (m1, n1) = t4 -> t3, (m2, n2) -> (m2, n2) -> (m2, n2) = t1 -> t4}
+: t1 -> t2 -| {t3 = (m3, m3) -> t2, (m1, n1) -> (m1, n1) -> (m1, n1) = t4 -> t3, (m2, n2) -> (m2, n2) -> (m2, n2) = t1 -> t4}
+generalize
+...
+{f : (m3, m3) -> (m3, m3)}

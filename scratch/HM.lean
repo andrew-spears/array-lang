@@ -408,6 +408,10 @@ section testing
       : IO Unit)
   )
 
+  #eval infer [lang| let id = fun x => x in let f = fun x => x+1 in id f]
+
+
+
   #test [lang| f x] : (Except.ok [ty| nat])
   #test [lang| f (g x)] : (.ok [ty| nat])
   #test [lang| h x y] : (.ok [ty| nat])
@@ -460,6 +464,7 @@ section testing
   #test [lang| let f' = fun x => x in let g' = fun y => f' y in g' 3] : (.ok [ty| nat])
   #test [lang| let c = fun a => fun b => a + b in c 1 2] : (.ok [ty| nat])
   #test [lang| let b = true in if b then let n = 1 in n else 0] : (.ok [ty| nat])
+
 
 end testing
 end hindley_milner
