@@ -27,7 +27,7 @@ def test_env := Env.extendInitial <| Env.ofList [
     ("A", [ty| (2, 3)]),
     ("C", [ty| (4, 5)]),
 ]
-#eval infer [lang| fun bb => a * bb * c] test_env -- Except.ok (3, 4) -> (2, 5)
+#eval infer [lang| fun B => A * B * C] test_env -- Except.ok (3, 4) -> (2, 5)
 ```
 
 TODO:
