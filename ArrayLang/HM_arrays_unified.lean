@@ -50,11 +50,11 @@ section arr_syntax
   declare_syntax_cat lang
 
   syntax num : lang
-  syntax "I" : lang        -- identity
   syntax ident : lang
   syntax "(" lang ")" : lang
   syntax:100 lang:100 lang:101 : lang                 -- application, left assoc
   syntax:65 lang:65 " + " lang:66 : lang              -- addition, left assoc
+  syntax:65 lang:65 " * " lang:66 : lang              -- matrix mult, left assoc
   syntax:10 "fun " ident " => " lang:10 : lang
   -- syntax:10 "if " lang " then " lang " else " lang:10 : lang
   syntax:10 "let " ident " = " lang " in " lang:10 : lang
@@ -65,20 +65,21 @@ section arr_syntax
   macro_rules
   | `([lang| $x:ident])          =>
     match x.getId.toString with
-    | "I$n" => `(Expr.const (Const.matrix n n (identity n)))
-    -- | "I" => `(Expr.var "I") -- TODO: We would like to have an I which implicitly takes a size argument and infers it from context
+    | "I" => `(Expr.var "I")
     | name    => `(Expr.var $(Lean.quote name))
   | `([lang| ($e)])              => `([lang| $e])
   | `([lang| $f $a])             => `(Expr.apply [lang| $f] [lang| $a])
   | `([lang| $a + $b])           => `(Expr.apply (Expr.apply (Expr.var "+") [lang| $a]) [lang| $b])
+  | `([lang| $a * $b])           => `(Expr.apply (Expr.apply (Expr.var "*") [lang| $a]) [lang| $b])
   | `([lang| fun $x => $b])      => `(Expr.lam $(Lean.quote x.getId.toString) [lang| $b])
   -- | `([lang| if $c then $t else $e]) => `(Expr.if_else [lang| $c] [lang| $t] [lang| $e])
   | `([lang| let $x = $e1 in $e2]) => `(Expr.let_in $(Lean.quote x.getId.toString) [lang| $e1] [lang| $e2])
 
    -- examples
-  #check [lang| I2]
+  #check [lang| I]
   #check [lang| true]
   #check [lang| I4 + x]
+  #check [lang| I4 * x]
   #check [lang| f x y]                          -- application is left assoc: (f x) y
   #check [lang| false y]                        -- parses fine, fails typechecking later
   #check [lang| fun x => x + I2]
@@ -113,12 +114,6 @@ deriving DecidableEq, BEq, Repr
 
 abbrev OpenType := type TypeAtom -- may contain TVars; not a 'real' type in the language
 
--- def type.tvars (t : OpenType) : List Nat :=
---   match t with
---   | .base (.var x) => [x]
---   | .arrow t1 t2 => (t1.tvars ++ t2.tvars).eraseDups
---   | _ => []
-
 structure Vars where
   tys : List Nat
   dims : List Nat
@@ -128,6 +123,16 @@ def Vars.union (a b : Vars) : Vars :=
   ⟨(a.tys ++ b.tys).eraseDups, (a.dims ++ b.dims).eraseDups⟩
 def Vars.removeAll (a b : Vars) : Vars :=
   ⟨a.tys.removeAll b.tys, a.dims.removeAll b.dims⟩
+
+def Dim.Vars (d : Dim) : Vars :=
+  match d with
+  | .var x => Vars.mk [] [x]
+  | .const _ => Vars.empty
+def type.Vars (t : OpenType) : Vars :=
+  match t with
+  | .base (.var x) => Vars.mk [x] []
+  | .base (.const (.arr m n)) => Vars.union m.Vars n.Vars
+  | .arrow t1 t2 => Vars.union t1.Vars t2.Vars
 
 /- universally quantified type, e.g. ∀ 'a, 'a -> 'a.
 This is fundamentally different than free type variables, e.g. ?0 -> ?0.
@@ -141,11 +146,8 @@ structure TypeScheme where
 instance : Coe OpenType TypeScheme := ⟨fun t => { bound := Vars.empty, body := t }⟩
 
 -- Vars present in the body but not quantified
--- def TypeScheme.free (σ : TypeScheme) : List TVar :=
---   σ.body.tvars.removeAll (σ.bound.filterMap λ t =>
---     match t with
---     | TDVar.TVar t => some t
---     | _ => none) -- TODO: Make analogous function for DVars? or just include them here
+def TypeScheme.free (σ : TypeScheme) : Vars :=
+  σ.body.Vars.removeAll σ.bound
 
 section open_type_syntax
   /- Surface syntax for type expressions, so we can write `[ty| nat -> '0]`
@@ -154,6 +156,7 @@ section open_type_syntax
   declare_syntax_cat dim
 
   syntax "#" num : dim -- variable dimension
+  syntax "#" "(" term ")" : dim -- variable dimension
   syntax num : dim -- known dimension
 
   declare_syntax_cat ty
@@ -167,7 +170,8 @@ section open_type_syntax
   syntax "[ty| " ty "]" : term
 
   def expandDim : Lean.TSyntax `dim → Lean.MacroM (Lean.TSyntax `term)
-    | `(dim | # $n:num) => `(Dim.var $n)
+    | `(dim | #$n:num) => `(Dim.var $n)
+    | `(dim | #($t:term)) => `(Dim.var $t)
     | `(dim | $n:num) => `(Dim.const $n)
     | _ => Lean.Macro.throwUnsupported
 
@@ -187,6 +191,7 @@ section open_type_syntax
   #check [ty| (2, 3)]
   #check [ty| ?0 -> ?1 -> ?0]
   #check [ty| ((#0, 3) -> (#0, 1)) -> ?2]
+  -- #check [ty| (#())]
 
   /- Print types back in the `[ty| ...]` surface syntax rather than as raw
   constructors, so `#eval` output is readable. Parenthesise the left side of an
@@ -282,8 +287,8 @@ abbrev Env.union (Γ Γ' : Env) : Env := -- preference to right arg
   { lookup:= λ name => if Γ'.lookup name = none then Γ.lookup name else Γ'.lookup name,
     domain:= Γ.domain ++ Γ'.domain }
 -- union of the free TVars across every binding
--- def Env.free (Γ : Env) :=
---   (Γ.domain.filterMap Γ.lookup).flatMap TypeScheme.free |>.eraseDups
+def Env.free (Γ : Env) : Vars :=
+  (Γ.domain.filterMap Γ.lookup).foldl (fun acc σ => acc.union σ.free) Vars.empty
 
 -- initial environment with types of built-ins
 abbrev initialEnv := Env.ofList [
@@ -377,11 +382,15 @@ partial def unify (C: List Constraint) : Error Subst :=
 
 -- replace all bound variables in a type scheme with fresh vars
 def instantiate (σ : TypeScheme) : InferM OpenType := do
-  let fresh_vars ← σ.bound.mapM (λ a' => do
-    let b' ← fresh
-    return (a', [ty| ?(b')])
+  let fresh_tys ← σ.bound.tys.mapM (λ a' => do
+    let b' ← freshT
+    return (a', type.base (TypeAtom.var b'))
   )
-  let S := Subst.parallel fresh_vars
+  let fresh_dims ← σ.bound.dims.mapM (λ m' => do
+    let n' ← freshD
+    return (m', Dim.var n')
+  )
+  let S := Subst.mk fresh_tys fresh_dims
   return σ.body.subst S
 
 -- generalize [name] into a universally quantified variable, return the modified env
@@ -389,7 +398,7 @@ def generalize (C : List Constraint) (Γ : Env) (name : Var) (t : OpenType) : Er
   let S ← unify C -- might fail
   let u := t.subst S
   let Γ' := Γ.subst S
-  let vars := u.tvars.removeAll Γ'.free
+  let vars := u.Vars.removeAll Γ'.free
   let scheme := { bound := vars, body := u }
   let Γ'' := Γ'.update name scheme
   return Γ''
@@ -397,9 +406,9 @@ def generalize (C : List Constraint) (Γ : Env) (name : Var) (t : OpenType) : Er
 
 -- return both the type of the expression (variable) and a list of constraints
 -- Γ |- e : t -| C, return t, C
-def buildConstraints (e : arr.Expr) (Γ : Env) : InferM (OpenType × List Constraint) :=
+def buildConstraints (e : Expr) (Γ : Env) : InferM (OpenType × List Constraint) :=
   match e with
-  | .const c => do return (type.base (TypeAtom.const (arr.getType c)), [])
+  | .const c => do return (type.base (TypeAtom.const (getType c)), [])
   | .var x => match Γ.lookup x with
     | some σ => do
       let t ← instantiate σ
@@ -432,30 +441,45 @@ def buildConstraints (e : arr.Expr) (Γ : Env) : InferM (OpenType × List Constr
     let (t2, C2) ← buildConstraints e2 Γ'
     return (t2, C1 ++ C2)
 
-def runBuildConstraints (e : arr.Expr) (Γ : Env := initialEnv) : Error (OpenType × List Constraint) :=
+def runBuildConstraints (e : Expr) (Γ : Env := initialEnv) : Error (OpenType × List Constraint) :=
   (buildConstraints e Γ).run' (0, 0)
 
 
 -- reduce open TVars like ?2 down to the lowest distinct naturals
-def lowerTVars (t : OpenType) : OpenType :=
-  let rn := t.tvars.zipIdx
-  t.subst (fun x => (rn.lookup x).map (fun i => [ty| ?(i)]))
+def lowerVars (t : OpenType) : OpenType :=
+  let rnT := t.Vars.tys.zipIdx
+  let rnD := t.Vars.dims.zipIdx
+  t.subst { tys := rnT.map (λ (x, y) => (x, [ty| ?(y)])), dims := rnD.map (λ (x, y) => (x, Dim.var y))}
+
+#eval lowerVars [ty| ?2 -> ?3]
+#eval lowerVars [ty| ?5 -> ?3 -> (#0, #4)]
 
 -- top level function, returns the inferred type
-def infer (e : arr.Expr) (Γ : Env := initialEnv) : Error OpenType := do
+def infer (e : Expr) (Γ : Env := initialEnv) : Error OpenType := do
   let (t', constraints)  ← runBuildConstraints e Γ
   let subst ← unify constraints
   let solved := t'.subst subst
-  let lowered := lowerTVars solved
+  let lowered := lowerVars solved
   return lowered
 
 section testing
   /- end to end tests -/
 
-  def test_env := Env.extendInitial <| Env.ofList [
+ def test_env := Env.extendInitial <| Env.ofList [
+    -- square matrices
     ("x", [ty| (2, 2)]),
     ("y", [ty| (2, 2)]),
-
+    ("z", [ty| (3, 3)]),
+    -- rectangular, chosen so a*b*c chains: (2,3)(3,4)(4,5) = (2,5)
+    ("a", [ty| (2, 3)]),
+    ("b", [ty| (3, 4)]),
+    ("c", [ty| (4, 5)]),
+    ("r", [ty| (3, 2)]),
+    -- function-typed bindings
+    ("f",  [ty| (2, 2) -> (2, 2)]),
+    ("h",  [ty| (2, 3) -> (3, 2)]),
+    ("g",  [sch| forall #0 #1, (#0, #1) -> (#0, #1)]),   -- shape-preserving map
+    ("tr", [sch| forall #0 #1, (#0, #1) -> (#1, #0)]),   -- transpose
   ]
 
   macro "#test " e:term " : " t:term : command => `(
@@ -467,59 +491,151 @@ section testing
       : IO Unit)
   )
 
-  #test [lang| x] : (Except.ok [ty| (2, 2)])
-  #test [lang| x + y] : (Except.ok [ty| (2, 2)])
-  -- #test [lang| f (g x)] : (.ok [ty| (2, 2)])
-  -- #test [lang| h x y] : (.ok [ty| (2, 2)])
-  -- #test [lang| nb (h x y)] : (.ok [ty| bool])
-  -- #test [lang| bn (nb (h x y))] : (.ok [ty| (2, 2)])
-  -- #test [lang| false y] : fail
-  -- #test [lang| fun x => x + 1] : (.ok [ty| int -> int])
-  -- #test [lang| if b1 then y else (2, 2)] : (.ok [ty| (2, 2)])
-  -- #test [lang| fun x' => if x' then (2, 2) else (2, 2)] : (.ok [ty| bool -> (2, 2)])
-  -- #test [lang| (fun x' => x' + (2, 2)) (2, 2)] : (.ok [ty| (2, 2)])
-  -- #test [lang| (fun f' => fun x' => f' (x' + (2, 2)))] : (.ok [ty| ((2, 2) -> ?0) -> (2, 2) -> ?0])
-  -- #test [lang| (let id = fun x => x in id)] : (.ok [ty| ?0 -> ?0])
-  -- #test [lang| (let id = fun x => x in id true)] : (.ok [ty| bool])
-  -- #test [lang| (let id = fun x => x in id (2, 2))] : (.ok [ty| (2, 2)])
+ /- ---------- basics: env lookup ---------- -/
+  #test [lang| x] : (.ok [ty| (2, 2)])
+  #test [lang| a] : (.ok [ty| (2, 3)])
+  #test [lang| unbound_name] : fail
 
-  -- /- let-polymorphism -/
-  -- #test [lang| let x' = (2, 2) in x'] : (.ok [ty| (2, 2)])
-  -- #test [lang| let x' = (2, 2) in let y' = true in y'] : (.ok [ty| bool])
-  -- #test [lang| let x' = (2, 2) in x' + (2, 2)] : (.ok [ty| (2, 2)])
-  -- #test [lang| let f' = fun x' => x' + (2, 2) in f' (2, 2)] : (.ok [ty| (2, 2)])
-  -- #test [lang| let f' = fun x' => x' + (2, 2) in f' true] : fail
+  /- ---------- addition: shapes must agree exactly ---------- -/
+  #test [lang| x + y] : (.ok [ty| (2, 2)])
+  #test [lang| x + z] : fail                    -- (2,2) vs (3,3)
+  #test [lang| a + a] : (.ok [ty| (2, 3)])
+  #test [lang| a + b] : fail                    -- (2,3) vs (3,4)
+  #test [lang| a + r] : fail                    -- (2,3) vs (3,2): transposed, not equal
+  #test [lang| x + y + x] : (.ok [ty| (2, 2)])  -- left assoc, all (2,2)
+  #test [lang| x + (y + x)] : (.ok [ty| (2, 2)])
 
-  -- -- the point of generalization: one binding used at two different types
-  -- #test [lang| let id = fun x => x in let a = id (2, 2) in id true] : (.ok [ty| bool])
-  -- #test [lang| let id = fun x => x in if id true then id (2, 2) else (2, 2)] : (.ok [ty| (2, 2)])
-  -- #test [lang| let id = fun x => x in (id (id (2, 2)))] : (.ok [ty| (2, 2)])
-  -- #test [lang| let id = fun x => x in fun z => id z] : (.ok [ty| ?0 -> ?0])
-  -- #test [lang| let id = fun x => x in fun z => id (id z)] : (.ok [ty| ?0 -> ?0])
+  /- ---------- matrix multiply: inner dimensions must match ---------- -/
+  #test [lang| a * b] : (.ok [ty| (2, 4)])
+  #test [lang| b * c] : (.ok [ty| (3, 5)])
+  #test [lang| x * y] : (.ok [ty| (2, 2)])
+  #test [lang| a * c] : fail        -- inner 3 vs 4
+  #test [lang| a * a] : fail        -- inner 3 vs 2
+  #test [lang| a * r] : (.ok [ty| (2, 2)])   -- (2,3)(3,2)
+  #test [lang| r * a] : (.ok [ty| (3, 3)])   -- (3,2)(2,3)
 
-  -- -- contrast: lambda-bound is NOT generalized, so this must fail
-  -- #test [lang| fun id => if id true then id (2, 2) else (2, 2)] : fail
+  -- chained, left assoc: ((a*b)*c) : (2,3)(3,4)(4,5) = (2,5)
+  #test [lang| a * b * c] : (.ok [ty| (2, 5)])
+  -- explicit right nesting: same answer, different constraint order
+  #test [lang| a * (b * c)] : (.ok [ty| (2, 5)])
 
-  -- /- generalizing multiple variables -/
-  -- #test [lang| let k = fun a => fun b => a in k (2, 2) true] : (.ok [ty| (2, 2)])
-  -- #test [lang| let k = fun a => fun b => a in k true (2, 2)] : (.ok [ty| bool])
-  -- #test [lang| let k = fun a => fun b => a in k] : (.ok [ty| ?0 -> ?1 -> ?0])
-  -- #test [lang| let ap = fun f' => fun v => f' v in ap (fun n => n + (2, 2)) (2, 2)] : (.ok [ty| (2, 2)])
-  -- #test [lang| let ap = fun f' => fun v => f' v in ap] : (.ok [ty| (?0 -> ?1) -> ?0 -> ?1])
+  /- `+` and `*` are both precedence 65 and left assoc, so mixed expressions
+  group strictly left to right: `a + b * c` is `(a + b) * c`, NOT `a + (b * c)`. -/
+  #test [lang| x + y * z] : fail             -- (x+y):(2,2) times z:(3,3), inner 2 vs 3
+  #test [lang| x + y * x] : (.ok [ty| (2, 2)])
+  #test [lang| a * r + x] : (.ok [ty| (2, 2)])   -- (a*r):(2,2) plus x:(2,2)
 
-  -- /- variables free in the env must NOT be generalized -/
-  -- #test [lang| fun y' => let f' = fun z => y' in f' (2, 2)] : (.ok [ty| ?0 -> ?0])
-  -- #test [lang| fun y' => let f' = fun z => y' in if f' (2, 2) then f' (2, 2) else (2, 2)] : fail
-  -- #test [lang| fun y' => let f' = fun z => y' in (f' (2, 2)) + (f' true)] : (.ok [ty| (2, 2) -> (2, 2)])
-  -- #test [lang| fun y' => let f' = fun z => y' in if y' then f' (2, 2) else f' true] : (.ok [ty| bool -> bool])
+  /- The worked example from HM-notes.md: `dot (dot A B) C` where B's shape is
+  unknown. Inference must implicitly solve B : (3,4) from the surrounding
+  constraints and return (2,5). Here B is a lambda-bound variable. -/
+  #test [lang| fun bb => a * bb * c] : (.ok [ty| (3, 4) -> (2, 5)])
+
+  /- ---------- polymorphic I : forall #0 #1, (#0, #1) ---------- -/
+  #test [lang| I] : (.ok [ty| (#0, #1)])        -- stays fully polymorphic
+  #test [lang| x + I] : (.ok [ty| (2, 2)])      -- I instantiates to (2,2)
+  #test [lang| I + x] : (.ok [ty| (2, 2)])
+  #test [lang| a + I] : (.ok [ty| (2, 3)])      -- I is not square-only
+  #test [lang| a * I] : (.ok [ty| (2, #0)])  -- inner solved, outer free
+  #test [lang| I * a] : (.ok [ty| (#0, 3)])
+  #test [lang| I * I] : (.ok [ty| (#0, #1)])
+
+  -- each *use* of I gets fresh dims, so two uses may take different shapes
+  -- #test [lang| let i = I in a * i] : (.ok [ty| (2, #0)])
 
 
-  -- /- nesting and shadowing -/
-  -- #test [lang| let id = fun x => x in let id2 = id in id2 true] : (.ok [ty| bool])
-  -- #test [lang| let x' = (2, 2) in let x' = true in x'] : (.ok [ty| bool])
-  -- #test [lang| let f' = fun x => x in let g' = fun y => f' y in g' (2, 2)] : (.ok [ty| (2, 2)])
-  -- #test [lang| let c = fun a => fun b => a + b in c (2, 2) (2, 2)] : (.ok [ty| (2, 2)])
-  -- #test [lang| let b = true in if b then let n = m(2, 2) in n else (2, 2)] : (.ok [ty| (2, 2)])
+  -- each *use* of I gets fresh dims, so two uses may take different shapes
+  -- #test [lang| let i = I in ~(mul [lang| a] [lang| i])] : (.ok [ty| (2, #0)])
+  -- #test [lang| (x + I) + z] : fail              -- forces (2,2) then (3,3)
+
+  /- ---------- lambdas and arrow types ---------- -/
+  #test [lang| fun v => v] : (.ok [ty| ?0 -> ?0])
+  #test [lang| fun v => v + x] : (.ok [ty| (2, 2) -> (2, 2)])
+  #test [lang| fun v => v + a] : (.ok [ty| (2, 3) -> (2, 3)])
+  -- #test [lang| fun v => v + I] : (.ok [ty| (#0, #1) -> (#0, #1)])
+  #test [lang| fun v => fun w => v + w] : (.ok [ty| (#0, #1) -> (#0, #1) -> (#0, #1)])
+  #test [lang| fun v => v * a] : (.ok [ty| (#0, 2) -> (#0, 3)])
+  #test [lang| fun v => a * v] : (.ok [ty| (3, #0) -> (2, #0)])
+
+
+  /- ---------- application of function-typed bindings ---------- -/
+  #test [lang| f x] : (.ok [ty| (2, 2)])
+  #test [lang| f z] : fail                      -- f wants (2,2)
+  #test [lang| f (f x)] : (.ok [ty| (2, 2)])
+  #test [lang| h a] : (.ok [ty| (3, 2)])
+  #test [lang| h x] : fail
+  #test [lang| g x] : (.ok [ty| (2, 2)])        -- g is shape-polymorphic
+  #test [lang| g a] : (.ok [ty| (2, 3)])
+  #test [lang| tr a] : (.ok [ty| (3, 2)])       -- transpose flips
+  #test [lang| tr (tr a)] : (.ok [ty| (2, 3)])  -- involution
+  #test [lang| a + (tr r)] : (.ok [ty| (2, 3)]) -- (3,2) transposed is (2,3)
+  #test [lang| a + (tr a)] : fail               -- (2,3) vs (3,2)
+  #test [lang| a * (tr a)] : (.ok [ty| (2, 2)])   -- A Aᵀ
+  #test [lang| (tr a) * a] : (.ok [ty| (3, 3)])   -- Aᵀ A
+
+
+  /- ---------- let-polymorphism over dimensions ----------
+  The worked example at HM-notes.md:407. `let f = fun v => v + I in f` should
+  generalize to a shape-preserving function, then be usable at a chosen shape. -/
+  -- #test [lang| let ff = fun v => v + I in ff]
+  --   : (.ok [ty| (#0, #1) -> (#0, #1)])
+  -- #test [lang| let ff = fun v => v + I in ff x] : (.ok [ty| (2, 2)])
+  -- #test [lang| let ff = fun v => v + I in ff a] : (.ok [ty| (2, 3)])
+  -- -- the payoff: one binding used at two different shapes
+  -- #test [lang| let ff = fun v => v + I in let p = ff x in ff a]
+  --   : (.ok [ty| (2, 3)])
+  -- monomorphic contrast: this one is pinned to (2,2) by x
+  #test [lang| let ff = fun v => v + x in ff a] : fail
+
+  #test [lang| let idm = fun v => v in idm x] : (.ok [ty| (2, 2)])
+  #test [lang| let idm = fun v => v in idm] : (.ok [ty| ?0 -> ?0])
+  #test [lang| let idm = fun v => v in let p = idm x in idm a]
+    : (.ok [ty| (2, 3)])
+  #test [lang| let idm = fun v => v in idm (idm a)] : (.ok [ty| (2, 3)])
+  #test [lang| let idm = fun v => v in fun w => idm w] : (.ok [ty| ?0 -> ?0])
+
+  /- ---------- generalization boundaries ----------
+  lambda-bound variables must NOT be generalized, so a lambda-bound function
+  used at two shapes must fail, while the let-bound version above succeeds. -/
+  #test [lang| fun k => (k x) * (k a)] : fail
+  -- variables free in the env must not be generalized
+  #test [lang| fun w => let ff = fun v => w in ff x] : (.ok [ty| ?0 -> ?0])
+  #test [lang| fun w => let ff = fun v => w in (ff x) + (ff a)]
+    : (.ok [ty| (#0, #1) -> (#0, #1)])
+
+  /- ---------- occurs check ---------- -/
+  #test [lang| fun s => s s] : fail
+  #test [lang| let w = fun s => s s in w] : fail
+
+  /- ---------- nesting and shadowing ---------- -/
+  #test [lang| let p = x in p] : (.ok [ty| (2, 2)])
+  #test [lang| let p = x in let p = a in p] : (.ok [ty| (2, 3)])
+  #test [lang| let p = x in let q = a in p + x] : (.ok [ty| (2, 2)])
+  #test [lang| let idm = fun v => v in let id2 = idm in id2 a]
+    : (.ok [ty| (2, 3)])
+  #test [lang| let ff = fun v => v in let gg = fun w => ff w in gg a]
+    : (.ok [ty| (2, 3)])
+  #test [lang| let addx = fun v => v + x in addx (x + y)] : (.ok [ty| (2, 2)])
+
+  /- ---------- lowerVars normalization ----------
+  Open results must be renumbered from 0, regardless of how many fresh vars
+  inference burned through internally. -/
+  #test [lang| fun v => fun w => v] : (.ok [ty| ?0 -> ?1 -> ?0])
+  #test [lang| fun v => fun w => w] : (.ok [ty| ?0 -> ?1 -> ?1])
+  #test [lang| let kk = fun v => fun w => v in kk] : (.ok [ty| ?0 -> ?1 -> ?0])
+  #test [lang| let kk = fun v => fun w => v in kk a x] : (.ok [ty| (2, 3)])
+  #test [lang| let kk = fun v => fun w => v in kk x a] : (.ok [ty| (2, 2)])
+  #test [lang| let ap = fun ff => fun v => ff v in ap] : (.ok [ty| (?0 -> ?1) -> ?0 -> ?1])
+  #test [lang| let ap = fun ff => fun v => ff v in ap g a] : (.ok [ty| (2, 3)])
+
+  /- ---------- blocked: `I2` literal syntax ----------
+  These depend on the macro at line 68 actually building identity matrices.
+  As written it matches the literal string "I$n", which no identifier equals,
+  so `I2` becomes `Expr.var "I2"` and every one of these fails as unbound. -/
+  #test [lang| I2] : (.ok [ty| (2, 2)])
+  #test [lang| I2 + x] : (.ok [ty| (2, 2)])
+  #test [lang| I3 + x] : fail
+  #test [lang| let p = I2 + I3 in p] : fail
+  #test (mul [lang| I2] [lang| I2]) : (.ok [ty| (2, 2)])
 
 end testing
 end hindley_milner
