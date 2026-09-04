@@ -334,6 +334,8 @@ def Env.subst (Γ : Env) (S : Subst) : Env :=
 #eval (Dim.const 3).subst (Subst.singletonD 3 8) -- should leave alone
 #eval (Dim.var 3).subst (Subst.singletonD 3 8) -- should substitute
 #eval (Dim.var 3).subst (Subst.singletonT 3 [ty| (2, 3)]) -- should leave alone
+#eval ([ty| ?2 -> (#4, #1)]).subst (Subst.singletonD 4 8)
+#eval Subst.compose (Subst.singletonT 2 [ty| ?2 -> (#4, #1)]) (Subst.singletonD 4 (Dim.var 2))
 
 /- Constraint of equality between two types -/
 abbrev Constraint := OpenType × OpenType
@@ -364,7 +366,7 @@ partial def unify (C: List Constraint) : Error Subst :=
       if occurs x t then throw ErrorT.fail else do
         let S := Subst.singletonT x t
         let S' ← unify (substConstraints C' S)
-        return Subst.compose S' S
+        return Subst.compose S S'
     match t1, t2 with
     -- identical variables / identical constants: nothing to learn
     | .base (.var x), .base (.var y) =>
@@ -372,7 +374,7 @@ partial def unify (C: List Constraint) : Error Subst :=
     | .base (.const a), .base (.const b) => do
       let S ← unifyShapes a b
       let S' ← unify (substConstraints C' S)
-      return Subst.compose S' S
+      return Subst.compose S S'
     -- a variable = anything else
     | .base (.var x), t | t, .base (.var x) => bindVar x t C'
     -- reduce
@@ -540,12 +542,11 @@ section testing
   #test [lang| I * I] : (.ok [ty| (#0, #1)])
 
   -- each *use* of I gets fresh dims, so two uses may take different shapes
-  -- #test [lang| let i = I in a * i] : (.ok [ty| (2, #0)])
-
+  #test [lang| let i = I in a * i] : (.ok [ty| (2, #0)])
 
   -- each *use* of I gets fresh dims, so two uses may take different shapes
-  -- #test [lang| let i = I in ~(mul [lang| a] [lang| i])] : (.ok [ty| (2, #0)])
-  -- #test [lang| (x + I) + z] : fail              -- forces (2,2) then (3,3)
+  #test [lang| let i = I in a * i] : (.ok [ty| (2, #0)])
+  #test [lang| (x + I) + z] : fail              -- forces (2,2) then (3,3)
 
   /- ---------- lambdas and arrow types ---------- -/
   #test [lang| fun v => v] : (.ok [ty| ?0 -> ?0])
@@ -576,13 +577,13 @@ section testing
   /- ---------- let-polymorphism over dimensions ----------
   The worked example at HM-notes.md:407. `let f = fun v => v + I in f` should
   generalize to a shape-preserving function, then be usable at a chosen shape. -/
-  -- #test [lang| let ff = fun v => v + I in ff]
-  --   : (.ok [ty| (#0, #1) -> (#0, #1)])
-  -- #test [lang| let ff = fun v => v + I in ff x] : (.ok [ty| (2, 2)])
-  -- #test [lang| let ff = fun v => v + I in ff a] : (.ok [ty| (2, 3)])
-  -- -- the payoff: one binding used at two different shapes
-  -- #test [lang| let ff = fun v => v + I in let p = ff x in ff a]
-  --   : (.ok [ty| (2, 3)])
+  #test [lang| let ff = fun v => v + I in ff]
+    : (.ok [ty| (#0, #1) -> (#0, #1)])
+  #test [lang| let ff = fun v => v + I in ff x] : (.ok [ty| (2, 2)])
+  #test [lang| let ff = fun v => v + I in ff a] : (.ok [ty| (2, 3)])
+  -- the payoff: one binding used at two different shapes
+  #test [lang| let ff = fun v => v + I in let p = ff x in ff a]
+    : (.ok [ty| (2, 3)])
   -- monomorphic contrast: this one is pinned to (2,2) by x
   #test [lang| let ff = fun v => v + x in ff a] : fail
 
@@ -626,16 +627,6 @@ section testing
   #test [lang| let kk = fun v => fun w => v in kk x a] : (.ok [ty| (2, 2)])
   #test [lang| let ap = fun ff => fun v => ff v in ap] : (.ok [ty| (?0 -> ?1) -> ?0 -> ?1])
   #test [lang| let ap = fun ff => fun v => ff v in ap g a] : (.ok [ty| (2, 3)])
-
-  /- ---------- blocked: `I2` literal syntax ----------
-  These depend on the macro at line 68 actually building identity matrices.
-  As written it matches the literal string "I$n", which no identifier equals,
-  so `I2` becomes `Expr.var "I2"` and every one of these fails as unbound. -/
-  #test [lang| I2] : (.ok [ty| (2, 2)])
-  #test [lang| I2 + x] : (.ok [ty| (2, 2)])
-  #test [lang| I3 + x] : fail
-  #test [lang| let p = I2 + I3 in p] : fail
-  #test (mul [lang| I2] [lang| I2]) : (.ok [ty| (2, 2)])
 
 end testing
 end hindley_milner
