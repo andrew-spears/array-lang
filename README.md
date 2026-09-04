@@ -2,6 +2,7 @@
 
 A programming language built around arrays with shapes encoded in types.
 All done in Lean with the intention of proving some correctness properties about types of the language.
+Almost all written without AI, with exceptions of generating test cases and Lean macros to make prettier syntax.
 
 In its current state, a toy example of a type inference algorithm for such a language (a modified form of Hindley-Milner). Also includes a Lean implementation of original Hindley-Milner.
 
